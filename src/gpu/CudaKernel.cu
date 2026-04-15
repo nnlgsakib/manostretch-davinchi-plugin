@@ -1,4 +1,4 @@
-// ManoStretch CUDA Kernels v4.1
+// ManoStretch CUDA Kernels v5.0
 // Soft start, post-FX (brightness/saturation), liquidify distortion
 
 #include <cuda_runtime.h>
@@ -45,7 +45,11 @@ __global__ void stretchKernel(
     float tR, float tG, float tB, float tintAmt,
     float fade, float param1, float param2,
     float startBlend, float postOpacity, float postBright, float postSat,
-    float liqAmount, float liqScale)
+    float postColorR, float postColorG, float postColorB, float postColorAmt,
+    float liqAmount, float liqScale,
+    float animProgress, float animGrow, float animEvolve, float animEvolveSpeed,
+    float animPulse, float animPulseFreq, float animWobble, float time,
+    float colorLock, float colorTolerance)
 {
     int px = blockIdx.x * blockDim.x + threadIdx.x;
     int py = blockIdx.y * blockDim.y + threadIdx.y;
@@ -61,16 +65,20 @@ __global__ void stretchKernel(
     float t = vx*ux + vy*uy;
     float d = vx*perpX + vy*perpY;
 
-    float localR = radius;
-    if (mode == 3) localR = radius * fmaxf(0.1f, 1.f - 0.9f * t / dLen);
+    // Soft end caps: extend valid zone beyond stroke endpoints
+    float capLen = radius * 0.5f;
+    if (t < -capLen || t > dLen + capLen) return;
 
-    if (t < 0.f || t > dLen) return;
+    // Clamp tNorm to [0,1] for displacement and mode calculations
+    float tNorm = fmaxf(0.f, fminf(t / dLen, 1.f));
+
+    float localR = radius;
+    if (mode == 3) localR = radius * fmaxf(0.1f, 1.f - 0.9f * tNorm);
+
     if (fabsf(d) > localR || localR < 0.5f) return;
 
     // Perpendicular falloff (smooth)
     float fo = smoothstep(1.f - fabsf(d) / localR);
-
-    float tNorm = t / dLen;
 
     // Soft start — smooth ramp-up at the beginning
     float sf = 1.f;
@@ -83,18 +91,53 @@ __global__ void stretchKernel(
 
     // Effect strength = how much displacement at this pixel
     float effect = fo * sf * lf;
+
+    // Smooth end caps: fade to zero at both stroke endpoints
+    if (t < 0.f) effect *= smoothstep(1.f + t / capLen);
+    if (t > dLen) effect *= smoothstep(1.f - (t - dLen) / capLen);
+
     if (effect < 0.001f) return;
 
-    // DISPLACEMENT: push pixel backward along drag direction.
-    // At t=0 → disp=0 (pixel stays in place = original face).
-    // At t=dLen → disp=dLen*strength (pixel samples from near start = stretched face).
-    // The compression factor is (1 - strength*effect):
-    //   srcT = t * (1 - strength * effect)
-    //   → at strength=1.0, effect=1.0: srcT = 0 (maps to start)
-    //   → at strength=0.5, effect=1.0: srcT = t*0.5 (halfway stretch)
-    float disp = t * strength * effect;
+    // Animation: Growth mask — reveal stroke from start to end
+    if (animGrow < 0.999f) {
+        if (tNorm > animGrow) return;
+        float growEdge = 0.05f;
+        if (tNorm > animGrow - growEdge)
+            effect *= smoothstep((animGrow - tNorm) / growEdge);
+    }
+
+    // Animation: Master progress
+    effect *= animProgress;
+    if (effect < 0.001f) return;
+
+    // Color Lock: reduce effect for pixels whose color differs from stroke start
+    if (colorLock > 0.01f) {
+        float refR = bilerp(src, w, h, sx, sy, 0);
+        float refG = bilerp(src, w, h, sx, sy, 1);
+        float refB = bilerp(src, w, h, sx, sy, 2);
+        float cr = bilerp(src, w, h, (float)px, (float)py, 0);
+        float cg = bilerp(src, w, h, (float)px, (float)py, 1);
+        float cb = bilerp(src, w, h, (float)px, (float)py, 2);
+        float dr=cr-refR, dg=cg-refG, db=cb-refB;
+        float dist = sqrtf(dr*dr + dg*dg + db*db);
+        float tol = fmaxf(0.01f, colorTolerance);
+        float colorMask = smoothstep(1.f - dist / tol);
+        effect *= 1.f - colorLock * (1.f - colorMask);
+        if (effect < 0.001f) return;
+    }
+
+    // Displacement backward along drag (use clamped tNorm to avoid reverse stretch in cap zones)
+    float disp = tNorm * dLen * strength * effect;
     float srcFx = (float)px - disp * ux;
     float srcFy = (float)py - disp * uy;
+
+    // Animation: Pulse — periodic displacement oscillation
+    if (animPulse > 0.001f) {
+        float pulse = 1.f + animPulse * sinf(time * animPulseFreq * 6.2832f);
+        float newDisp = disp * pulse;
+        srcFx = (float)px - newDisp * ux;
+        srcFy = (float)py - newDisp * uy;
+    }
 
     // Mode-specific source modifications (on top of displacement)
     switch (mode) {
@@ -132,6 +175,20 @@ __global__ void stretchKernel(
         }
     }
 
+    // Animation: Time evolve — organic turbulence per frame
+    if (animEvolve > 0.01f) {
+        float et = time * animEvolveSpeed;
+        srcFx += sinf(srcFy * 0.03f + et * 2.7183f) * animEvolve * effect;
+        srcFy += cosf(srcFx * 0.03f + et * 3.1416f) * animEvolve * effect;
+    }
+
+    // Animation: Wobble — time-varying perpendicular oscillation
+    if (animWobble > 0.01f) {
+        float wob = sinf(time * 3.0f + tNorm * 6.2832f) * animWobble * effect;
+        srcFx += wob * perpX;
+        srcFy += wob * perpY;
+    }
+
     // Liquidify: sinusoidal offset on source coords
     if (liqAmount > 0.01f) {
         float freq = liqScale * 0.05f;
@@ -164,6 +221,13 @@ __global__ void stretchKernel(
         rgba[2] = gray + (rgba[2] - gray) * postSat;
     }
 
+    // Post color overlay
+    if (postColorAmt > 0.001f) {
+        rgba[0] = rgba[0] * (1.f - postColorAmt) + postColorR * postColorAmt;
+        rgba[1] = rgba[1] * (1.f - postColorAmt) + postColorG * postColorAmt;
+        rgba[2] = rgba[2] * (1.f - postColorAmt) + postColorB * postColorAmt;
+    }
+
     // Blend: effect controls both displacement AND opacity
     float blend = effect * postOpacity;
     int idx = (py * w + px) * 4;
@@ -178,11 +242,20 @@ extern "C" void RunCudaStretch(
     float tR, float tG, float tB, float tintAmt,
     float fade, float p1, float p2,
     float startBlend, float postOpacity, float postBright, float postSat,
-    float liqAmount, float liqScale)
+    float postColorR, float postColorG, float postColorB, float postColorAmt,
+    float liqAmount, float liqScale,
+    float animProgress, float animGrow, float animEvolve, float animEvolveSpeed,
+    float animPulse, float animPulseFreq, float animWobble, float time,
+    float colorLock, float colorTolerance)
 {
     dim3 blk(16,16), grd((w+15)/16,(h+15)/16);
     stretchKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
         src, dst, w, h, sx, sy, ex, ey, radius, strength, mode,
         tR, tG, tB, tintAmt, fade, p1, p2,
-        startBlend, postOpacity, postBright, postSat, liqAmount, liqScale);
+        startBlend, postOpacity, postBright, postSat,
+        postColorR, postColorG, postColorB, postColorAmt,
+        liqAmount, liqScale,
+        animProgress, animGrow, animEvolve, animEvolveSpeed,
+        animPulse, animPulseFreq, animWobble, time,
+        colorLock, colorTolerance);
 }

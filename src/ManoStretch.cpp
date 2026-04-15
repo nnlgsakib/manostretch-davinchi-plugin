@@ -1,4 +1,4 @@
-// ManoStretch.cpp v4.1 — Advanced Pixel Stretch for DaVinci Resolve
+// ManoStretch.cpp v5.0 — Advanced Pixel Stretch for DaVinci Resolve
 //
 // Features: 6 modes, color tint, soft start, post-FX, liquidify,
 //           stroke serialization (undo/redo), all params keyframeable.
@@ -8,7 +8,6 @@
 #include "ofxsInteract.h"
 #include <cmath>
 #include <algorithm>
-#include <mutex>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -27,13 +26,14 @@
 #define kPluginName        "ManoStretch"
 #define kPluginGrouping    "Distort"
 #define kPluginDescription \
-    "ManoStretch v4.1 — click & drag to stretch pixels.\n" \
+    "ManoStretch v5.0 — click & drag to stretch pixels.\n" \
     "6 modes, color tint, post-FX, liquidify.\n" \
+    "Keyframeable animation: progress, growth, evolve, pulse, wobble.\n" \
     "All params editable after stretching. Ctrl+Z undoes strokes.\n" \
     "[ ] resize brush.  R to reset."
 #define kPluginIdentifier  "com.mano.stretch"
-#define kPluginVersionMajor 4
-#define kPluginVersionMinor 1
+#define kPluginVersionMajor 5
+#define kPluginVersionMinor 0
 
 #define kSupportsTiles false
 #define kSupportsMultiResolution false
@@ -51,7 +51,11 @@ extern "C" void RunCudaStretch(void* stream, const float* src, float* dst,
     float tR, float tG, float tB, float tintAmt,
     float fade, float p1, float p2,
     float startBlend, float postOpacity, float postBright, float postSat,
-    float liqAmount, float liqScale);
+    float postColorR, float postColorG, float postColorB, float postColorAmt,
+    float liqAmount, float liqScale,
+    float animProgress, float animGrow, float animEvolve, float animEvolveSpeed,
+    float animPulse, float animPulseFreq, float animWobble, float time,
+    float colorLock, float colorTolerance);
 #endif
 
 enum StretchMode { eLinear=0, eSpiral=1, eWave=2, eTaper=3, eSmear=4, eShatter=5 };
@@ -67,9 +71,7 @@ struct StretchStroke {
     double fade, param1, param2;
 };
 
-// Global stroke list for overlay interact (secondary to string param)
-static std::mutex                 g_strokeMutex;
-static std::vector<StretchStroke> g_strokes;
+// Strokes are per-interact-instance (see ManoStretchInteract::m_strokes)
 
 // ================================================================
 //  Stroke serialization — stored in OFX StringParam for undo/redo
@@ -144,7 +146,14 @@ static inline float smoothstep(float t) {
 // ================================================================
 struct PostFX {
     float startBlend, postOpacity, postBright, postSat;
+    float postColorR, postColorG, postColorB, postColorAmt;
     float liqAmount, liqScale;
+    float time;
+    float animProgress, animGrow;
+    float animEvolve, animEvolveSpeed;
+    float animPulse, animPulseFreq;
+    float animWobble;
+    float colorLock, colorTolerance;
 };
 
 // DISPLACEMENT-BASED STRETCH — matches CUDA kernel.
@@ -168,6 +177,15 @@ static void cpuStretch(
     float tAmt=(float)st.tintAmt;
     int mode = st.mode;
 
+    // Color Lock: sample reference color at stroke start
+    bool useColorLock = fx.colorLock > 0.01f;
+    float refR=0.f, refG=0.f, refB=0.f;
+    if (useColorLock) {
+        refR = bilerpCPU(srcBase, sB, sRB, sx, sy, 0);
+        refG = bilerpCPU(srcBase, sB, sRB, sx, sy, 1);
+        refB = bilerpCPU(srcBase, sB, sRB, sx, sy, 2);
+    }
+
     float bx0=(std::min)(sx,ex)-rPx, bx1=(std::max)(sx,ex)+rPx;
     float by0=(std::min)(sy,ey)-rPx, by1=(std::max)(sy,ey)+rPx;
     int ix0=(std::max)((int)std::floor(bx0), dB.x1);
@@ -180,14 +198,19 @@ static void cpuStretch(
         float vx=(float)px-sx, vy=(float)py-sy;
         float t=vx*ux+vy*uy, d=vx*perpX+vy*perpY;
 
-        float localR = rPx;
-        if (mode==eTaper) localR = rPx * (std::max)(0.1f, 1.f-0.9f*t/dLen);
+        // Soft end caps: extend valid zone beyond stroke endpoints
+        float capLen = rPx * 0.5f;
+        if (t < -capLen || t > dLen + capLen) continue;
 
-        if (t<0.f||t>dLen) continue;
+        // Clamp tN to [0,1] for displacement and mode calculations
+        float tN = (std::max)(0.f, (std::min)(t / dLen, 1.f));
+
+        float localR = rPx;
+        if (mode==eTaper) localR = rPx * (std::max)(0.1f, 1.f-0.9f*tN);
+
         if (std::abs(d)>localR||localR<0.5f) continue;
 
         float fo = smoothstep(1.f - std::abs(d)/localR);
-        float tN = t / dLen;
 
         float sf = 1.f;
         if (fx.startBlend>0.001f && tN<fx.startBlend)
@@ -197,12 +220,50 @@ static void cpuStretch(
         if (lf<0.f) lf=0.f;
 
         float effect = fo * sf * lf;
+
+        // Smooth end caps: fade to zero at both stroke endpoints
+        if (t < 0.f) effect *= smoothstep(1.f + t / capLen);
+        if (t > dLen) effect *= smoothstep(1.f - (t - dLen) / capLen);
+
         if (effect<0.001f) continue;
 
-        // Displacement backward along drag
-        float disp = t * strength * effect;
+        // Animation: Growth mask — reveal stroke from start to end
+        if (fx.animGrow < 0.999f) {
+            if (tN > fx.animGrow) continue;
+            float growEdge = 0.05f;
+            if (tN > fx.animGrow - growEdge)
+                effect *= smoothstep((fx.animGrow - tN) / growEdge);
+        }
+
+        // Animation: Master progress
+        effect *= fx.animProgress;
+        if (effect < 0.001f) continue;
+
+        // Color Lock: reduce effect for pixels whose color differs from stroke start
+        if (useColorLock) {
+            float cr = bilerpCPU(srcBase, sB, sRB, (float)px, (float)py, 0);
+            float cg = bilerpCPU(srcBase, sB, sRB, (float)px, (float)py, 1);
+            float cb = bilerpCPU(srcBase, sB, sRB, (float)px, (float)py, 2);
+            float dr=cr-refR, dg=cg-refG, db=cb-refB;
+            float dist = std::sqrt(dr*dr + dg*dg + db*db);
+            float tol = (std::max)(0.01f, fx.colorTolerance);
+            float colorMask = smoothstep(1.f - dist / tol);
+            effect *= 1.f - fx.colorLock * (1.f - colorMask);
+            if (effect < 0.001f) continue;
+        }
+
+        // Displacement backward along drag (use clamped tN to avoid reverse stretch in cap zones)
+        float disp = tN * dLen * strength * effect;
         float srcFx = (float)px - disp * ux;
         float srcFy = (float)py - disp * uy;
+
+        // Animation: Pulse — periodic displacement oscillation
+        if (fx.animPulse > 0.001f) {
+            float pulse = 1.f + fx.animPulse * std::sin(fx.time * fx.animPulseFreq * (float)(2.0*M_PI));
+            float newDisp = disp * pulse;
+            srcFx = (float)px - newDisp * ux;
+            srcFy = (float)py - newDisp * uy;
+        }
 
         // Mode-specific modifications
         switch (mode) {
@@ -237,6 +298,20 @@ static void cpuStretch(
           }
         }
 
+        // Animation: Time evolve — organic turbulence per frame
+        if (fx.animEvolve > 0.01f) {
+            float et = fx.time * fx.animEvolveSpeed;
+            srcFx += std::sin(srcFy * 0.03f + et * 2.7183f) * fx.animEvolve * effect;
+            srcFy += std::cos(srcFx * 0.03f + et * 3.1416f) * fx.animEvolve * effect;
+        }
+
+        // Animation: Wobble — time-varying perpendicular oscillation
+        if (fx.animWobble > 0.01f) {
+            float wob = std::sin(fx.time * 3.0f + tN * (float)(2.0*M_PI)) * fx.animWobble * effect;
+            srcFx += wob * perpX;
+            srcFy += wob * perpY;
+        }
+
         // Liquidify
         if (fx.liqAmount > 0.01f) {
             float freq = fx.liqScale * 0.05f;
@@ -263,6 +338,11 @@ static void cpuStretch(
             rgba[1]=gray+(rgba[1]-gray)*fx.postSat;
             rgba[2]=gray+(rgba[2]-gray)*fx.postSat;
         }
+        if (fx.postColorAmt > 0.001f) {
+            rgba[0]=rgba[0]*(1.f-fx.postColorAmt)+fx.postColorR*fx.postColorAmt;
+            rgba[1]=rgba[1]*(1.f-fx.postColorAmt)+fx.postColorG*fx.postColorAmt;
+            rgba[2]=rgba[2]*(1.f-fx.postColorAmt)+fx.postColorB*fx.postColorAmt;
+        }
 
         float blend = effect * fx.postOpacity;
         float* dp = pxAt(dstBase, dB, dRB, px, py);
@@ -286,8 +366,19 @@ public:
         m_PostOpacity = fetchDoubleParam("postOpacity");
         m_PostBright  = fetchDoubleParam("postBright");
         m_PostSat     = fetchDoubleParam("postSat");
+        m_PostColor   = fetchRGBParam("postColor");
+        m_PostColorAmt = fetchDoubleParam("postColorAmt");
         m_LiqAmount   = fetchDoubleParam("liqAmount");
-        m_LiqScale    = fetchDoubleParam("liqScale");
+        m_LiqScale       = fetchDoubleParam("liqScale");
+        m_AnimProgress   = fetchDoubleParam("animProgress");
+        m_AnimGrow       = fetchDoubleParam("animGrow");
+        m_AnimEvolve     = fetchDoubleParam("animEvolve");
+        m_AnimEvolveSpeed = fetchDoubleParam("animEvolveSpeed");
+        m_AnimPulse      = fetchDoubleParam("animPulse");
+        m_AnimPulseFreq  = fetchDoubleParam("animPulseFreq");
+        m_AnimWobble     = fetchDoubleParam("animWobble");
+        m_ColorLock      = fetchDoubleParam("colorLock");
+        m_ColorTolerance = fetchDoubleParam("colorTolerance");
     }
 
     virtual void render(const RenderArguments& a) {
@@ -312,8 +403,22 @@ public:
         m_PostOpacity->getValue(v); fx.postOpacity  = (float)(v / 100.0);
         m_PostBright->getValue(v);  fx.postBright   = (float)v;
         m_PostSat->getValue(v);     fx.postSat      = (float)v;
+        { double cr,cg,cb;
+          m_PostColor->getValueAtTime(a.time, cr, cg, cb);
+          fx.postColorR=(float)cr; fx.postColorG=(float)cg; fx.postColorB=(float)cb; }
+        m_PostColorAmt->getValueAtTime(a.time, v); fx.postColorAmt = (float)(v / 100.0);
         m_LiqAmount->getValue(v);   fx.liqAmount    = (float)v;
         m_LiqScale->getValue(v);    fx.liqScale     = (float)v;
+        fx.time = (float)a.time;
+        m_AnimProgress->getValueAtTime(a.time, v);    fx.animProgress    = (float)(v / 100.0);
+        m_AnimGrow->getValueAtTime(a.time, v);         fx.animGrow        = (float)(v / 100.0);
+        m_AnimEvolve->getValueAtTime(a.time, v);       fx.animEvolve      = (float)v;
+        m_AnimEvolveSpeed->getValueAtTime(a.time, v);  fx.animEvolveSpeed = (float)v;
+        m_AnimPulse->getValueAtTime(a.time, v);        fx.animPulse       = (float)(v / 100.0);
+        m_AnimPulseFreq->getValueAtTime(a.time, v);    fx.animPulseFreq   = (float)v;
+        m_AnimWobble->getValueAtTime(a.time, v);       fx.animWobble      = (float)v;
+        m_ColorLock->getValue(v);       fx.colorLock      = (float)(v / 100.0);
+        m_ColorTolerance->getValue(v);  fx.colorTolerance = (float)(v / 100.0);
 
         double rsx=a.renderScale.x, rsy=a.renderScale.y;
         int maxD = (std::max)(w, h);
@@ -332,7 +437,11 @@ public:
                     (float)s.tintR,(float)s.tintG,(float)s.tintB,(float)s.tintAmt,
                     (float)s.fade, (float)s.param1, (float)s.param2,
                     fx.startBlend, fx.postOpacity, fx.postBright, fx.postSat,
-                    fx.liqAmount, fx.liqScale);
+                    fx.postColorR, fx.postColorG, fx.postColorB, fx.postColorAmt,
+                    fx.liqAmount, fx.liqScale,
+                    fx.animProgress, fx.animGrow, fx.animEvolve, fx.animEvolveSpeed,
+                    fx.animPulse, fx.animPulseFreq, fx.animWobble, fx.time,
+                    fx.colorLock, fx.colorTolerance);
             }
             return;
         }
@@ -368,27 +477,24 @@ private:
     Clip *m_Dst, *m_Src;
     StringParam *m_StrokeData;
     DoubleParam *m_StartBlend, *m_PostOpacity, *m_PostBright, *m_PostSat;
+    RGBParam *m_PostColor; DoubleParam *m_PostColorAmt;
     DoubleParam *m_LiqAmount, *m_LiqScale;
+    DoubleParam *m_AnimProgress, *m_AnimGrow, *m_AnimEvolve, *m_AnimEvolveSpeed;
+    DoubleParam *m_AnimPulse, *m_AnimPulseFreq, *m_AnimWobble;
+    DoubleParam *m_ColorLock, *m_ColorTolerance;
 };
 
-// ================================================================
 //  Overlay Interact
 // ================================================================
 class ManoStretchInteract : public OverlayInteract {
 public:
     ManoStretchInteract(OfxInteractHandle h, ImageEffect* e)
         : OverlayInteract(h), m_drag(false), m_cx(0),m_cy(0),
-          m_sx(0),m_sy(0), m_has(false), m_synced(false) {}
+          m_sx(0),m_sy(0), m_has(false) {}
 
     virtual bool draw(const DrawArgs& args) {
-        // Sync global strokes from string param on first draw (project reload)
-        if (!m_synced) {
-            m_synced = true;
-            std::string sd;
-            _effect->fetchStringParam("_strokeData")->getValue(sd);
-            std::lock_guard<std::mutex> lk(g_strokeMutex);
-            g_strokes = deserializeStrokes(sd);
-        }
+        // Re-sync from param when not dragging (catches undo/redo & host changes)
+        if (!m_drag) syncFromParam();
 
         double rv; _effect->fetchDoubleParam("radius")->getValue(rv);
         double rc = 100.0;
@@ -401,9 +507,7 @@ public:
         if (!m_has) return false;
 
         double tR,tG,tB,tAmt;
-        _effect->fetchDoubleParam("tintR")->getValue(tR);
-        _effect->fetchDoubleParam("tintG")->getValue(tG);
-        _effect->fetchDoubleParam("tintB")->getValue(tB);
+        _effect->fetchRGBParam("tintColor")->getValue(tR, tG, tB);
         _effect->fetchDoubleParam("tintAmount")->getValue(tAmt);
 
 #ifdef _WIN32
@@ -437,8 +541,7 @@ public:
 
         // Stroke count indicator
         {
-            std::lock_guard<std::mutex> lk(g_strokeMutex);
-            int n = (int)g_strokes.size();
+            int n = (int)m_strokes.size();
             if (n > 0) {
                 // Small dots for each stroke at top-left
                 glColor4f(1.f,0.8f,0.f,0.7f);
@@ -549,6 +652,7 @@ public:
     }
 
     virtual bool penDown(const PenArgs& args) {
+        syncFromParam();  // Always get latest state (catches undo/redo)
         m_drag = true;
         m_sx = m_cx = args.penPosition.x;
         m_sy = m_cy = args.penPosition.y;
@@ -560,15 +664,15 @@ public:
         _effect->fetchDoubleParam("strength")->getValue(v); s.strength=v/100.0;
         _effect->fetchDoubleParam("radius")->getValue(v);   s.radius=v;
         _effect->fetchDoubleParam("fade")->getValue(v);     s.fade=v;
-        _effect->fetchDoubleParam("tintR")->getValue(v);    s.tintR=v;
-        _effect->fetchDoubleParam("tintG")->getValue(v);    s.tintG=v;
-        _effect->fetchDoubleParam("tintB")->getValue(v);    s.tintB=v;
+        { double tr,tg,tb;
+          _effect->fetchRGBParam("tintColor")->getValue(tr, tg, tb);
+          s.tintR=tr; s.tintG=tg; s.tintB=tb; }
         _effect->fetchDoubleParam("tintAmount")->getValue(v); s.tintAmt=v/100.0;
         _effect->fetchDoubleParam("param1")->getValue(v);   s.param1=v;
         _effect->fetchDoubleParam("param2")->getValue(v);   s.param2=v;
         int m; _effect->fetchChoiceParam("mode")->getValue(m); s.mode=m;
 
-        { std::lock_guard<std::mutex> lk(g_strokeMutex); g_strokes.push_back(s); }
+        m_strokes.push_back(s);
         requestRedraw();
         return true;
     }
@@ -585,12 +689,10 @@ public:
         m_cx=args.penPosition.x; m_cy=args.penPosition.y;
         m_has = true;
         if (m_drag) {
-            { std::lock_guard<std::mutex> lk(g_strokeMutex);
-              if (!g_strokes.empty()) {
-                  g_strokes.back().endX = m_cx;
-                  g_strokes.back().endY = m_cy;
-              } }
-            // Live update: serialize to param for re-render
+            if (!m_strokes.empty()) {
+                m_strokes.back().endX = m_cx;
+                m_strokes.back().endY = m_cy;
+            }
             syncToParam();
         }
         requestRedraw();
@@ -598,9 +700,9 @@ public:
     }
 
     virtual bool keyDown(const KeyArgs& args) {
+        syncFromParam();  // Always get latest state
         if (args.keyString=="r"||args.keyString=="R") {
-            { std::lock_guard<std::mutex> lk(g_strokeMutex); g_strokes.clear(); }
-            // Clear the string param — this is undoable!
+            m_strokes.clear();
             _effect->beginEditBlock("msReset");
             _effect->fetchStringParam("_strokeData")->setValue("");
             _effect->endEditBlock();
@@ -620,12 +722,17 @@ public:
     }
 
 private:
-    bool m_drag; double m_cx,m_cy,m_sx,m_sy; bool m_has, m_synced;
+    bool m_drag; double m_cx,m_cy,m_sx,m_sy; bool m_has;
+    std::vector<StretchStroke> m_strokes;
+
+    void syncFromParam() {
+        std::string sd;
+        _effect->fetchStringParam("_strokeData")->getValue(sd);
+        m_strokes = deserializeStrokes(sd);
+    }
 
     void syncToParam() {
-        std::string data;
-        { std::lock_guard<std::mutex> lk(g_strokeMutex);
-          data = serializeStrokes(g_strokes); }
+        std::string data = serializeStrokes(m_strokes);
         _effect->beginEditBlock("msStroke");
         _effect->fetchStringParam("_strokeData")->setValue(data);
         _effect->endEditBlock();
@@ -709,25 +816,35 @@ public:
           p->setDefault(0.3); p->setRange(0,1); p->setDisplayRange(0,1);
           p->setHint("Fade-out at the stretch end"); p->setAnimates(true); pg->addChild(*p); }
 
-        // ========== COLOR TINT ==========
-        { GroupParamDescriptor* g = d.defineGroupParam("grpTint");
-          g->setLabels("Color Tint","Color Tint","Color Tint");
+        // ========== COLOR LOCK (content-aware stretch) ==========
+        { GroupParamDescriptor* g = d.defineGroupParam("grpColorLock");
+          g->setLabels("Color Lock","Color Lock","Color Lock");
           g->setOpen(false); pg->addChild(*g);
 
           DoubleParamDescriptor* p;
-          p = d.defineDoubleParam("tintR");
-          p->setLabels("Tint Red","Tint Red","Tint Red");
-          p->setDefault(1); p->setRange(0,2); p->setDisplayRange(0,2);
+          p = d.defineDoubleParam("colorLock");
+          p->setLabels("Color Lock","Color Lock","Color Lock");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
+          p->setHint("Lock stretch to colors matching the drag start point (0=stretch all, 100=only matching colors)");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
-          p = d.defineDoubleParam("tintG");
-          p->setLabels("Tint Green","Tint Green","Tint Green");
-          p->setDefault(1); p->setRange(0,2); p->setDisplayRange(0,2);
+          p = d.defineDoubleParam("colorTolerance");
+          p->setLabels("Color Tolerance","Color Tolerance","Color Tolerance");
+          p->setDefault(30); p->setRange(1,100); p->setDisplayRange(1,100);
+          p->setHint("How similar colors must be to be stretched (lower=stricter, higher=more inclusive)");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
-          p = d.defineDoubleParam("tintB");
-          p->setLabels("Tint Blue","Tint Blue","Tint Blue");
-          p->setDefault(1); p->setRange(0,2); p->setDisplayRange(0,2);
-          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
-          p = d.defineDoubleParam("tintAmount");
+        }
+
+        // ========== COLOURMAN ==========
+        { GroupParamDescriptor* g = d.defineGroupParam("grpColourman");
+          g->setLabels("Colourman","Colourman","Colourman");
+          g->setOpen(false); pg->addChild(*g);
+
+          RGBParamDescriptor* c = d.defineRGBParam("tintColor");
+          c->setLabels("Tint Color","Tint Color","Tint Color");
+          c->setDefault(1, 1, 1);
+          c->setHint("Color picker for per-stroke tint");
+          c->setAnimates(true); c->setParent(*g); pg->addChild(*c);
+          DoubleParamDescriptor* p = d.defineDoubleParam("tintAmount");
           p->setLabels("Tint Amount","Tint Amount","Tint Amount");
           p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
@@ -771,6 +888,16 @@ public:
           p->setDefault(1); p->setRange(0,3); p->setDisplayRange(0,2);
           p->setHint("Saturate/desaturate stretched pixels"); p->setAnimates(true);
           p->setParent(*g); pg->addChild(*p);
+          RGBParamDescriptor* c = d.defineRGBParam("postColor");
+          c->setLabels("Color Overlay","Color Overlay","Color Overlay");
+          c->setDefault(1, 1, 1);
+          c->setHint("Color to overlay on stretched pixels");
+          c->setAnimates(true); c->setParent(*g); pg->addChild(*c);
+          p = d.defineDoubleParam("postColorAmt");
+          p->setLabels("Color Amount","Color Amount","Color Amount");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
+          p->setHint("How much of the color overlay to apply (0=none, 100=full)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
         // ========== LIQUIDIFY ==========
@@ -788,6 +915,49 @@ public:
           p->setLabels("Liquid Scale","Liquid Scale","Liquid Scale");
           p->setDefault(5); p->setRange(0.5,30); p->setDisplayRange(0.5,20);
           p->setHint("Frequency of the liquid distortion");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ========== ANIMATION (keyframeable for video!) ==========
+        { GroupParamDescriptor* g = d.defineGroupParam("grpAnimation");
+          g->setLabels("Animation","Animation","Animation");
+          g->setOpen(true); pg->addChild(*g);
+
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("animProgress");
+          p->setLabels("Effect Progress","Effect Progress","Effect Progress");
+          p->setDefault(100); p->setRange(0,100); p->setDisplayRange(0,100);
+          p->setHint("Master intensity — keyframe 0→100 to animate the stretch in/out");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("animGrow");
+          p->setLabels("Growth","Growth","Growth");
+          p->setDefault(100); p->setRange(0,100); p->setDisplayRange(0,100);
+          p->setHint("Stroke reveal — keyframe 0→100 to grow strokes from start to end");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("animEvolve");
+          p->setLabels("Time Evolve","Time Evolve","Time Evolve");
+          p->setDefault(0); p->setRange(0,50); p->setDisplayRange(0,30);
+          p->setHint("Organic turbulence that evolves over time (per-frame variation)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("animEvolveSpeed");
+          p->setLabels("Evolve Speed","Evolve Speed","Evolve Speed");
+          p->setDefault(1); p->setRange(0.1,10); p->setDisplayRange(0.1,5);
+          p->setHint("Speed of the evolving turbulence");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("animPulse");
+          p->setLabels("Pulse","Pulse","Pulse");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Periodic pulsing of stretch displacement — breathing/pumping effect");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("animPulseFreq");
+          p->setLabels("Pulse Speed","Pulse Speed","Pulse Speed");
+          p->setDefault(2); p->setRange(0.1,10); p->setDisplayRange(0.1,5);
+          p->setHint("Pulse frequency in cycles per second");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("animWobble");
+          p->setLabels("Wobble","Wobble","Wobble");
+          p->setDefault(0); p->setRange(0,50); p->setDisplayRange(0,30);
+          p->setHint("Time-varying perpendicular wobble — creates waving/jelly effect");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
