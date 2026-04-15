@@ -1,5 +1,5 @@
-// ManoStretch CUDA Kernels v5.0
-// Soft start, post-FX (brightness/saturation), liquidify distortion
+// ManoStretch CUDA Kernels v6.0
+// Modular surrealism art tool — Stretch, Surrealism, Dreamcore passes
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -453,4 +453,159 @@ extern "C" void RunCudaGlobalFX(
     globalFXKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
         dst, w, h, vignette, grain, scanlines, dreamHaze,
         globalHueShift, pixelate, mirrorGlobal, time);
+}
+
+// ================================================================
+//  Surrealism module — full-frame distortions & color FX (CUDA)
+// ================================================================
+__global__ void surrealismKernel(const float* srcCopy, float* dst, int w, int h,
+    float fractalAmt, float fractalScale, float kaleidoSegs,
+    float vortexAmt, float meltAmt, float glitchAmt, float glitchBand,
+    float waveFreq, float waveAmp, float chromaAb, float posterize,
+    float hueShift, float solarize, float colorInvert, float time)
+{
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    float lx = (float)px, ly = (float)py;
+    float srcX = lx, srcY = ly;
+    float cx = w * 0.5f, cy = h * 0.5f;
+
+    // Kaleidoscope
+    if (kaleidoSegs > 1.5f) {
+        float dx = srcX - cx, dy = srcY - cy;
+        float ang = atan2f(dy, dx);
+        float segs = floorf(kaleidoSegs);
+        float sector = 6.2832f / segs;
+        float angM = fmodf(fabsf(ang), sector);
+        if (angM > sector * 0.5f) angM = sector - angM;
+        float rr = sqrtf(dx*dx + dy*dy);
+        srcX = cx + rr * cosf(angM);
+        srcY = cy + rr * sinf(angM);
+    }
+
+    // Vortex swirl
+    if (vortexAmt > 0.01f) {
+        float dx = srcX - cx, dy = srcY - cy;
+        float dist = sqrtf(dx*dx + dy*dy);
+        float maxR = fmaxf((float)w, (float)h) * 0.5f;
+        float falloff = (dist < maxR) ? (1.f - dist/maxR) : 0.f;
+        float angle = vortexAmt * falloff * falloff * 6.2832f;
+        float cs = cosf(angle), sn = sinf(angle);
+        srcX = cx + dx*cs - dy*sn;
+        srcY = cy + dx*sn + dy*cs;
+    }
+
+    // Fractal warp
+    if (fractalAmt > 0.01f) {
+        float scale = fractalScale * 0.02f;
+        float ffx = srcX, ffy = srcY;
+        for (int it = 0; it < 4; it++) {
+            ffx += sinf(ffy * scale + time * 0.3f) * fractalAmt;
+            ffy += cosf(ffx * scale + time * 0.2f) * fractalAmt;
+        }
+        srcX = ffx; srcY = ffy;
+    }
+
+    // Melt
+    if (fabsf(meltAmt) > 0.01f) {
+        float ny = ly / (float)h;
+        srcY -= meltAmt * ny * ny * (float)h * 0.1f;
+    }
+
+    // Glitch
+    if (glitchAmt > 0.01f) {
+        float bandH = fmaxf(2.f, glitchBand * 10.f);
+        float band = floorf(ly / bandH);
+        float rnd = phash(band * 0.1f + time * 0.01f, band * 0.3f);
+        srcX += (rnd - 0.5f) * 2.f * glitchAmt * (float)w * 0.05f;
+    }
+
+    // Wave
+    if (waveAmp > 0.01f) {
+        float nx = lx / (float)w, ny = ly / (float)h;
+        srcX += sinf(ny * waveFreq * 6.2832f + time) * waveAmp;
+        srcY += cosf(nx * waveFreq * 6.2832f + time*0.7f) * waveAmp;
+    }
+
+    // Sample from source copy
+    float rgba[4];
+    for (int c = 0; c < 4; c++)
+        rgba[c] = bilerp(srcCopy, w, h, srcX, srcY, c);
+
+    // Chromatic Aberration
+    if (chromaAb > 0.01f) {
+        rgba[0] = bilerp(srcCopy, w, h, srcX + chromaAb, srcY, 0);
+        rgba[2] = bilerp(srcCopy, w, h, srcX - chromaAb, srcY, 2);
+    }
+
+    // Posterize
+    if (posterize > 1.5f) {
+        float lvl = floorf(posterize);
+        for (int c=0; c<3; c++)
+            rgba[c] = floorf(rgba[c] * lvl) / lvl;
+    }
+
+    // Hue Shift
+    if (fabsf(hueShift) > 0.001f) {
+        float cosA = cosf(hueShift), sinA = sinf(hueShift);
+        float s3 = 0.57735f, omc = 1.f - cosA, th = 1.f/3.f;
+        float r=rgba[0], g=rgba[1], b=rgba[2];
+        rgba[0] = r*(cosA+omc*th) + g*(omc*th-s3*sinA) + b*(omc*th+s3*sinA);
+        rgba[1] = r*(omc*th+s3*sinA) + g*(cosA+omc*th) + b*(omc*th-s3*sinA);
+        rgba[2] = r*(omc*th-s3*sinA) + g*(omc*th+s3*sinA) + b*(cosA+omc*th);
+        for (int c=0; c<3; c++) rgba[c] = fmaxf(0.f, rgba[c]);
+    }
+
+    // Solarize
+    if (solarize > 0.01f) {
+        float thresh = 1.f - solarize;
+        for (int c=0; c<3; c++) {
+            if (rgba[c] > thresh)
+                rgba[c] = rgba[c]*(1.f-solarize) + (1.f-rgba[c])*solarize;
+        }
+    }
+
+    // Color Invert
+    if (colorInvert > 0.01f) {
+        for (int c=0; c<3; c++)
+            rgba[c] = rgba[c]*(1.f-colorInvert) + (1.f-rgba[c])*colorInvert;
+    }
+
+    int idx = (py * w + px) * 4;
+    for (int c = 0; c < 4; c++) dst[idx+c] = rgba[c];
+}
+
+extern "C" void RunCudaSurrealismPass(
+    void* stream, float* dst, int w, int h,
+    float fractalAmt, float fractalScale, float kaleidoSegs,
+    float vortexAmt, float meltAmt, float glitchAmt, float glitchBand,
+    float waveFreq, float waveAmp, float chromaAb, float posterize,
+    float hueShift, float solarize, float colorInvert, float time)
+{
+    bool hasDist = fractalAmt > 0.01f || kaleidoSegs > 1.5f
+                || vortexAmt > 0.01f || fabsf(meltAmt) > 0.01f
+                || glitchAmt > 0.01f || waveAmp > 0.01f;
+    bool hasColor = chromaAb > 0.01f || posterize > 1.5f
+                 || fabsf(hueShift) > 0.001f || solarize > 0.01f
+                 || colorInvert > 0.01f;
+    if (!hasDist && !hasColor) return;
+
+    // Allocate temp copy of dst for safe reading during distortions
+    int n = w * h * 4;
+    float* tmp = nullptr;
+    cudaMalloc(&tmp, n * sizeof(float));
+    cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                    static_cast<cudaStream_t>(stream));
+
+    dim3 blk(16,16), grd((w+15)/16,(h+15)/16);
+    surrealismKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+        tmp, dst, w, h,
+        fractalAmt, fractalScale, kaleidoSegs,
+        vortexAmt, meltAmt, glitchAmt, glitchBand,
+        waveFreq, waveAmp, chromaAb, posterize,
+        hueShift, solarize, colorInvert, time);
+
+    cudaFree(tmp);
 }

@@ -1,7 +1,8 @@
-// ManoStretch.cpp v5.0 — Advanced Pixel Stretch for DaVinci Resolve
+// ManoStretch.cpp v6.0 — Surrealism Art Tool for DaVinci Resolve
 //
-// Features: 6 modes, color tint, soft start, post-FX, liquidify,
-//           stroke serialization (undo/redo), all params keyframeable.
+// Three independent modules: Stretch, Surrealism, Dreamcore.
+// Each module has its own effects, distortions, animations, configs.
+// All params keyframeable. Stroke serialization for undo/redo.
 
 #include "ofxsImageEffect.h"
 #include "ofxsParam.h"
@@ -26,13 +27,14 @@
 #define kPluginName        "ManoStretch"
 #define kPluginGrouping    "Distort"
 #define kPluginDescription \
-    "ManoStretch v5.0 — click & drag to stretch pixels.\n" \
-    "6 modes, color tint, post-FX, liquidify.\n" \
-    "Keyframeable animation: progress, growth, evolve, pulse, wobble.\n" \
-    "All params editable after stretching. Ctrl+Z undoes strokes.\n" \
-    "[ ] resize brush.  R to reset."
+    "ManoStretch v6.0 — Surrealism Art Tool\n" \
+    "Three modules: Stretch · Surrealism · Dreamcore\n" \
+    "Stretch: click & drag pixel warp (12 modes, post-FX, animation)\n" \
+    "Surrealism: full-frame warps & color (kaleidoscope, vortex, fractal...)\n" \
+    "Dreamcore: atmosphere (vignette, grain, haze, scanlines...)\n" \
+    "Z undo stroke. [ ] resize brush. R reset. All keyframeable."
 #define kPluginIdentifier  "com.mano.stretch"
-#define kPluginVersionMajor 5
+#define kPluginVersionMajor 6
 #define kPluginVersionMinor 0
 
 #define kSupportsTiles false
@@ -61,6 +63,14 @@ extern "C" void RunCudaGlobalFX(void* stream, float* dst,
     int w, int h,
     float vignette, float grain, float scanlines, float dreamHaze,
     float globalHueShift, float pixelate, float mirrorGlobal, float time);
+extern "C" void RunCudaSurrealismPass(void* stream, float* dst,
+    int w, int h,
+    float fractalAmt, float fractalScale,
+    float kaleidoSegs, float vortexAmt, float meltAmt,
+    float glitchAmt, float glitchBand,
+    float waveFreq, float waveAmp,
+    float chromaAb, float posterize, float hueShift,
+    float solarize, float colorInvert, float time);
 #endif
 
 enum StretchMode { eLinear=0, eSpiral=1, eWave=2, eTaper=3, eSmear=4, eShatter=5,
@@ -556,6 +566,169 @@ static void cpuGlobalFX(void* dstBase, const OfxRectI& dB, int dRB,
 }
 
 // ================================================================
+//  Flat-buffer bilinear sampler (for temp copy in surrealism pass)
+// ================================================================
+static float bilerpFlat(const float* buf, int w, int h, float fx, float fy, int ch) {
+    int x0=(int)std::floor(fx), y0=(int)std::floor(fy), x1=x0+1, y1=y0+1;
+    if (x0<0||y0<0||x1>=w||y1>=h) return 0.f;
+    float u=fx-x0, v=fy-y0;
+    return (buf[(y0*w+x0)*4+ch]*(1-u)+buf[(y0*w+x1)*4+ch]*u)*(1-v)
+          +(buf[(y1*w+x0)*4+ch]*(1-u)+buf[(y1*w+x1)*4+ch]*u)*v;
+}
+
+// ================================================================
+//  Module 2: Surrealism — full-frame distortions & color FX
+// ================================================================
+struct SurrealismFX {
+    float fractalAmt, fractalScale;
+    float kaleidoSegs;
+    float vortexAmt;
+    float meltAmt;
+    float glitchAmt, glitchBand;
+    float waveFreq, waveAmp;
+    float chromaAb;
+    float posterize;
+    float hueShift;
+    float solarize;
+    float colorInvert;
+    float time;
+};
+
+static void cpuSurrealismPass(void* dstBase, const OfxRectI& dB, int dRB,
+                               int w, int h, const SurrealismFX& sfx)
+{
+    bool hasDist = sfx.fractalAmt > 0.01f || sfx.kaleidoSegs > 1.5f
+                || sfx.vortexAmt > 0.01f || std::abs(sfx.meltAmt) > 0.01f
+                || sfx.glitchAmt > 0.01f || sfx.waveAmp > 0.01f;
+    bool hasColor = sfx.chromaAb > 0.01f || sfx.posterize > 1.5f
+                 || std::abs(sfx.hueShift) > 0.001f || sfx.solarize > 0.01f
+                 || sfx.colorInvert > 0.01f;
+    if (!hasDist && !hasColor) return;
+
+    // Copy current dst to temp for safe reading during distortions
+    std::vector<float> temp(w * h * 4);
+    for (int y = dB.y1; y < dB.y2; y++) {
+        float* row = pxAt(dstBase, dB, dRB, dB.x1, y);
+        if (row) std::memcpy(&temp[(y - dB.y1) * w * 4], row, w * 4 * sizeof(float));
+    }
+
+    float cx = w * 0.5f, cy = h * 0.5f;
+
+    for (int py = dB.y1; py < dB.y2; py++) {
+      for (int px = dB.x1; px < dB.x2; px++) {
+        float* dp = pxAt(dstBase, dB, dRB, px, py);
+        if (!dp) continue;
+
+        float lx = (float)(px - dB.x1), ly = (float)(py - dB.y1);
+        float srcX = lx, srcY = ly;
+
+        // Kaleidoscope — mirror fold around center
+        if (sfx.kaleidoSegs > 1.5f) {
+            float dx = srcX - cx, dy = srcY - cy;
+            float ang = std::atan2(dy, dx);
+            float segs = std::floor(sfx.kaleidoSegs);
+            float sector = (float)(2.0*M_PI) / segs;
+            float angM = std::fmod(std::abs(ang), sector);
+            if (angM > sector * 0.5f) angM = sector - angM;
+            float rr = std::sqrt(dx*dx + dy*dy);
+            srcX = cx + rr * std::cos(angM);
+            srcY = cy + rr * std::sin(angM);
+        }
+
+        // Vortex swirl — radial rotation from center
+        if (sfx.vortexAmt > 0.01f) {
+            float dx = srcX - cx, dy = srcY - cy;
+            float dist = std::sqrt(dx*dx + dy*dy);
+            float maxR = (std::max)((float)w, (float)h) * 0.5f;
+            float falloff = (dist < maxR) ? (1.f - dist/maxR) : 0.f;
+            float angle = sfx.vortexAmt * falloff * falloff * (float)(2.0*M_PI);
+            float cs = std::cos(angle), sn = std::sin(angle);
+            srcX = cx + dx*cs - dy*sn;
+            srcY = cy + dx*sn + dy*cs;
+        }
+
+        // Fractal warp — iterative sinusoidal displacement
+        if (sfx.fractalAmt > 0.01f) {
+            float scale = sfx.fractalScale * 0.02f;
+            float ffx = srcX, ffy = srcY;
+            for (int it = 0; it < 4; it++) {
+                ffx += std::sin(ffy * scale + sfx.time * 0.3f) * sfx.fractalAmt;
+                ffy += std::cos(ffx * scale + sfx.time * 0.2f) * sfx.fractalAmt;
+            }
+            srcX = ffx; srcY = ffy;
+        }
+
+        // Melt — vertical drip based on position
+        if (std::abs(sfx.meltAmt) > 0.01f) {
+            float ny = ly / (float)h;
+            srcY -= sfx.meltAmt * ny * ny * (float)h * 0.1f;
+        }
+
+        // Glitch — horizontal band displacement
+        if (sfx.glitchAmt > 0.01f) {
+            float bandH = (std::max)(2.f, sfx.glitchBand * 10.f);
+            float band = std::floor(ly / bandH);
+            float rnd = cpuHash(band * 0.1f + sfx.time * 0.01f, band * 0.3f);
+            srcX += (rnd - 0.5f) * 2.f * sfx.glitchAmt * (float)w * 0.05f;
+        }
+
+        // Wave — sinusoidal distortion
+        if (sfx.waveAmp > 0.01f) {
+            float nx = lx / (float)w, ny = ly / (float)h;
+            srcX += std::sin(ny * sfx.waveFreq * (float)(2.0*M_PI) + sfx.time) * sfx.waveAmp;
+            srcY += std::cos(nx * sfx.waveFreq * (float)(2.0*M_PI) + sfx.time*0.7f) * sfx.waveAmp;
+        }
+
+        // Sample from temp copy
+        float rgba[4];
+        for (int c = 0; c < 4; c++)
+            rgba[c] = bilerpFlat(temp.data(), w, h, srcX, srcY, c);
+
+        // Chromatic Aberration — full-frame RGB split
+        if (sfx.chromaAb > 0.01f) {
+            rgba[0] = bilerpFlat(temp.data(), w, h, srcX + sfx.chromaAb, srcY, 0);
+            rgba[2] = bilerpFlat(temp.data(), w, h, srcX - sfx.chromaAb, srcY, 2);
+        }
+
+        // Posterize
+        if (sfx.posterize > 1.5f) {
+            float lvl = std::floor(sfx.posterize);
+            for (int c=0; c<3; c++)
+                rgba[c] = std::floor(rgba[c] * lvl) / lvl;
+        }
+
+        // Hue Shift
+        if (std::abs(sfx.hueShift) > 0.001f) {
+            float cosA = std::cos(sfx.hueShift), sinA = std::sin(sfx.hueShift);
+            float s3 = 0.57735f, omc = 1.f - cosA, th = 1.f/3.f;
+            float r=rgba[0], g=rgba[1], b=rgba[2];
+            rgba[0] = r*(cosA+omc*th) + g*(omc*th-s3*sinA) + b*(omc*th+s3*sinA);
+            rgba[1] = r*(omc*th+s3*sinA) + g*(cosA+omc*th) + b*(omc*th-s3*sinA);
+            rgba[2] = r*(omc*th-s3*sinA) + g*(omc*th+s3*sinA) + b*(cosA+omc*th);
+            for (int c=0; c<3; c++) rgba[c] = (std::max)(0.f, rgba[c]);
+        }
+
+        // Solarize
+        if (sfx.solarize > 0.01f) {
+            float thresh = 1.f - sfx.solarize;
+            for (int c=0; c<3; c++) {
+                if (rgba[c] > thresh)
+                    rgba[c] = rgba[c]*(1.f-sfx.solarize) + (1.f-rgba[c])*sfx.solarize;
+            }
+        }
+
+        // Color Invert
+        if (sfx.colorInvert > 0.01f) {
+            for (int c=0; c<3; c++)
+                rgba[c] = rgba[c]*(1.f-sfx.colorInvert) + (1.f-rgba[c])*sfx.colorInvert;
+        }
+
+        for (int c = 0; c < 4; c++) dp[c] = rgba[c];
+      }
+    }
+}
+
+// ================================================================
 //  Plugin
 // ================================================================
 class ManoStretchPlugin : public ImageEffect {
@@ -593,6 +766,25 @@ public:
         m_GlobalHueShift = fetchDoubleParam("globalHueShift");
         m_Pixelate       = fetchDoubleParam("pixelate");
         m_MirrorGlobal   = fetchDoubleParam("mirrorGlobal");
+        // Module enables
+        m_EnableStretch    = fetchBooleanParam("enableStretch");
+        m_EnableSurrealism = fetchBooleanParam("enableSurrealism");
+        m_EnableDreamcore  = fetchBooleanParam("enableDreamcore");
+        // Surrealism module params
+        m_SurrFractalAmt   = fetchDoubleParam("surrFractalAmt");
+        m_SurrFractalScale = fetchDoubleParam("surrFractalScale");
+        m_SurrKaleidoSegs  = fetchDoubleParam("surrKaleidoSegs");
+        m_SurrVortexAmt    = fetchDoubleParam("surrVortexAmt");
+        m_SurrMeltAmt      = fetchDoubleParam("surrMeltAmt");
+        m_SurrGlitchAmt    = fetchDoubleParam("surrGlitchAmt");
+        m_SurrGlitchBand   = fetchDoubleParam("surrGlitchBand");
+        m_SurrWaveFreq     = fetchDoubleParam("surrWaveFreq");
+        m_SurrWaveAmp      = fetchDoubleParam("surrWaveAmp");
+        m_SurrChromaAb     = fetchDoubleParam("surrChromaAb");
+        m_SurrPosterize    = fetchDoubleParam("surrPosterize");
+        m_SurrHueShift     = fetchDoubleParam("surrHueShift");
+        m_SurrSolarize     = fetchDoubleParam("surrSolarize");
+        m_SurrColorInvert  = fetchDoubleParam("surrColorInvert");
     }
 
     virtual void render(const RenderArguments& a) {
@@ -646,6 +838,32 @@ public:
         m_Pixelate->getValueAtTime(a.time, v);       fx.pixelate       = (float)v;
         m_MirrorGlobal->getValueAtTime(a.time, v);   fx.mirrorGlobal   = (float)v;
 
+        // Module enable flags
+        bool bStretch = false, bSurrealism = false, bDreamcore = false;
+        m_EnableStretch->getValue(bStretch);
+        m_EnableSurrealism->getValue(bSurrealism);
+        m_EnableDreamcore->getValue(bDreamcore);
+
+        // Surrealism FX params
+        SurrealismFX sfx = {};
+        sfx.time = (float)a.time;
+        if (bSurrealism) {
+            m_SurrFractalAmt->getValueAtTime(a.time, v);   sfx.fractalAmt   = (float)v;
+            m_SurrFractalScale->getValueAtTime(a.time, v);  sfx.fractalScale = (float)v;
+            m_SurrKaleidoSegs->getValueAtTime(a.time, v);   sfx.kaleidoSegs  = (float)v;
+            m_SurrVortexAmt->getValueAtTime(a.time, v);     sfx.vortexAmt    = (float)v;
+            m_SurrMeltAmt->getValueAtTime(a.time, v);       sfx.meltAmt      = (float)v;
+            m_SurrGlitchAmt->getValueAtTime(a.time, v);     sfx.glitchAmt    = (float)v;
+            m_SurrGlitchBand->getValueAtTime(a.time, v);    sfx.glitchBand   = (float)v;
+            m_SurrWaveFreq->getValueAtTime(a.time, v);      sfx.waveFreq     = (float)v;
+            m_SurrWaveAmp->getValueAtTime(a.time, v);       sfx.waveAmp      = (float)v;
+            m_SurrChromaAb->getValueAtTime(a.time, v);      sfx.chromaAb     = (float)v;
+            m_SurrPosterize->getValueAtTime(a.time, v);     sfx.posterize    = (float)v;
+            m_SurrHueShift->getValueAtTime(a.time, v);      sfx.hueShift     = (float)(v * M_PI / 180.0);
+            m_SurrSolarize->getValueAtTime(a.time, v);      sfx.solarize     = (float)(v / 100.0);
+            m_SurrColorInvert->getValueAtTime(a.time, v);   sfx.colorInvert  = (float)(v / 100.0);
+        }
+
         double rsx=a.renderScale.x, rsy=a.renderScale.y;
         int maxD = (std::max)(w, h);
 
@@ -654,25 +872,36 @@ public:
             const float* sD = (const float*)src->getPixelData();
             float* dD = (float*)dst->getPixelData();
             RunCudaCopyKernel(a.pCudaStream, sD, dD, w*h);
-            for (auto& s : strokes) {
-                float lsx=(float)(s.startX*rsx)-dB.x1, lsy=(float)(s.startY*rsy)-dB.y1;
-                float lex=(float)(s.endX*rsx)-dB.x1,   ley=(float)(s.endY*rsy)-dB.y1;
-                float rPx=(float)(s.radius*maxD/100.0);
-                RunCudaStretch(a.pCudaStream, sD, dD, w, h, lsx, lsy, lex, ley,
-                    rPx, (float)s.strength, s.mode,
-                    (float)s.tintR,(float)s.tintG,(float)s.tintB,(float)s.tintAmt,
-                    (float)s.fade, (float)s.param1, (float)s.param2,
-                    fx.startBlend, fx.postOpacity, fx.postBright, fx.postSat,
-                    fx.postColorR, fx.postColorG, fx.postColorB, fx.postColorAmt,
-                    fx.liqAmount, fx.liqScale,
-                    fx.animProgress, fx.animGrow, fx.animEvolve, fx.animEvolveSpeed,
-                    fx.animPulse, fx.animPulseFreq, fx.animWobble, fx.time,
-                    fx.colorLock, fx.colorTolerance,
-                    fx.chromaAb, fx.posterize, fx.hueShift, fx.solarize, fx.colorInvert);
+            if (bStretch) {
+                for (auto& s : strokes) {
+                    float lsx=(float)(s.startX*rsx)-dB.x1, lsy=(float)(s.startY*rsy)-dB.y1;
+                    float lex=(float)(s.endX*rsx)-dB.x1,   ley=(float)(s.endY*rsy)-dB.y1;
+                    float rPx=(float)(s.radius*maxD/100.0);
+                    RunCudaStretch(a.pCudaStream, sD, dD, w, h, lsx, lsy, lex, ley,
+                        rPx, (float)s.strength, s.mode,
+                        (float)s.tintR,(float)s.tintG,(float)s.tintB,(float)s.tintAmt,
+                        (float)s.fade, (float)s.param1, (float)s.param2,
+                        fx.startBlend, fx.postOpacity, fx.postBright, fx.postSat,
+                        fx.postColorR, fx.postColorG, fx.postColorB, fx.postColorAmt,
+                        fx.liqAmount, fx.liqScale,
+                        fx.animProgress, fx.animGrow, fx.animEvolve, fx.animEvolveSpeed,
+                        fx.animPulse, fx.animPulseFreq, fx.animWobble, fx.time,
+                        fx.colorLock, fx.colorTolerance,
+                        fx.chromaAb, fx.posterize, fx.hueShift, fx.solarize, fx.colorInvert);
+                }
             }
-            RunCudaGlobalFX(a.pCudaStream, dD, w, h,
-                fx.vignette, fx.grain, fx.scanlines, fx.dreamHaze,
-                fx.globalHueShift, fx.pixelate, fx.mirrorGlobal, fx.time);
+            if (bSurrealism) {
+                RunCudaSurrealismPass(a.pCudaStream, dD, w, h,
+                    sfx.fractalAmt, sfx.fractalScale, sfx.kaleidoSegs,
+                    sfx.vortexAmt, sfx.meltAmt, sfx.glitchAmt, sfx.glitchBand,
+                    sfx.waveFreq, sfx.waveAmp, sfx.chromaAb, sfx.posterize,
+                    sfx.hueShift, sfx.solarize, sfx.colorInvert, sfx.time);
+            }
+            if (bDreamcore) {
+                RunCudaGlobalFX(a.pCudaStream, dD, w, h,
+                    fx.vignette, fx.grain, fx.scanlines, fx.dreamHaze,
+                    fx.globalHueShift, fx.pixelate, fx.mirrorGlobal, fx.time);
+            }
             return;
         }
 #endif
@@ -687,21 +916,34 @@ public:
             else if(dr) std::memset(dr,0,w*4*sizeof(float));
         }
 
-        for (auto& s : strokes) {
-            StretchStroke ls = s;
-            ls.startX*=rsx; ls.startY*=rsy;
-            ls.endX*=rsx;   ls.endY*=rsy;
-            cpuStretch(sBase, sB, sRB, dBase, dB, dRB, ls, maxD, fx);
+        if (bStretch) {
+            for (auto& s : strokes) {
+                StretchStroke ls = s;
+                ls.startX*=rsx; ls.startY*=rsy;
+                ls.endX*=rsx;   ls.endY*=rsy;
+                cpuStretch(sBase, sB, sRB, dBase, dB, dRB, ls, maxD, fx);
+            }
         }
 
-        cpuGlobalFX(dBase, dB, dRB, w, h, fx);
+        if (bSurrealism)
+            cpuSurrealismPass(dBase, dB, dRB, w, h, sfx);
+
+        if (bDreamcore)
+            cpuGlobalFX(dBase, dB, dRB, w, h, fx);
     }
 
     virtual bool isIdentity(const IsIdentityArguments& a,
                             Clip*& c, double& t) {
-        std::string strokeStr;
-        m_StrokeData->getValue(strokeStr);
-        if (strokeStr.empty()) { c = m_Src; t = a.time; return true; }
+        bool bS=false, bR=false, bD=false;
+        m_EnableStretch->getValue(bS);
+        m_EnableSurrealism->getValue(bR);
+        m_EnableDreamcore->getValue(bD);
+        if (!bR && !bD) {
+            if (!bS) { c = m_Src; t = a.time; return true; }
+            std::string strokeStr;
+            m_StrokeData->getValue(strokeStr);
+            if (strokeStr.empty()) { c = m_Src; t = a.time; return true; }
+        }
         return false;
     }
 
@@ -717,6 +959,13 @@ private:
     DoubleParam *m_ChromaAb, *m_Posterize, *m_HueShift, *m_Solarize, *m_ColorInvert;
     DoubleParam *m_Vignette, *m_Grain, *m_Scanlines, *m_DreamHaze;
     DoubleParam *m_GlobalHueShift, *m_Pixelate, *m_MirrorGlobal;
+    BooleanParam *m_EnableStretch, *m_EnableSurrealism, *m_EnableDreamcore;
+    DoubleParam *m_SurrFractalAmt, *m_SurrFractalScale, *m_SurrKaleidoSegs;
+    DoubleParam *m_SurrVortexAmt, *m_SurrMeltAmt;
+    DoubleParam *m_SurrGlitchAmt, *m_SurrGlitchBand;
+    DoubleParam *m_SurrWaveFreq, *m_SurrWaveAmp;
+    DoubleParam *m_SurrChromaAb, *m_SurrPosterize, *m_SurrHueShift;
+    DoubleParam *m_SurrSolarize, *m_SurrColorInvert;
 };
 
 //  Overlay Interact
@@ -1025,6 +1274,29 @@ public:
 
         PageParamDescriptor* pg = d.definePageParam("Controls");
 
+        // ========== MODULE ENABLES ==========
+        { GroupParamDescriptor* g = d.defineGroupParam("grpModules");
+          g->setLabels("Modules","Modules","Modules");
+          g->setOpen(true); pg->addChild(*g);
+
+          BooleanParamDescriptor* b;
+          b = d.defineBooleanParam("enableStretch");
+          b->setLabels("Stretch","Stretch","Stretch");
+          b->setDefault(true);
+          b->setHint("Enable the stroke-based pixel stretch module");
+          b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          b = d.defineBooleanParam("enableSurrealism");
+          b->setLabels("Surrealism","Surrealism","Surrealism");
+          b->setDefault(false);
+          b->setHint("Enable full-frame surrealism distortions & color FX");
+          b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          b = d.defineBooleanParam("enableDreamcore");
+          b->setLabels("Dreamcore","Dreamcore","Dreamcore");
+          b->setDefault(false);
+          b->setHint("Enable full-frame atmosphere effects (vignette, grain, haze...)");
+          b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+        }
+
         // ========== BRUSH SETTINGS ==========
         { GroupParamDescriptor* g = d.defineGroupParam("grpBrush");
           g->setLabels("Brush Settings","Brush Settings","Brush Settings");
@@ -1240,14 +1512,91 @@ public:
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
           p = d.defineDoubleParam("colorInvert");
           p->setLabels("Color Invert","Color Invert","Color Invert");
-          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
           p->setHint("Blend toward color negative (0=normal, 100=fully inverted)");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
-        // ========== GLOBAL ATMOSPHERE ==========
-        { GroupParamDescriptor* g = d.defineGroupParam("grpAtmosphere");
-          g->setLabels("Atmosphere","Atmosphere","Atmosphere");
+        // ========== SURREALISM MODULE (full-frame distortions & color) ==========
+        { GroupParamDescriptor* g = d.defineGroupParam("grpSurrealism");
+          g->setLabels("Surrealism","Surrealism","Surrealism");
+          g->setOpen(false); pg->addChild(*g);
+
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("surrFractalAmt");
+          p->setLabels("Fractal Warp","Fractal Warp","Fractal Warp");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Iterative sinusoidal warp — organic fractal distortion");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrFractalScale");
+          p->setLabels("Fractal Scale","Fractal Scale","Fractal Scale");
+          p->setDefault(5); p->setRange(0.1,50); p->setDisplayRange(0.5,20);
+          p->setHint("Scale/frequency of fractal warp");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrKaleidoSegs");
+          p->setLabels("Kaleidoscope","Kaleidoscope","Kaleidoscope");
+          p->setDefault(0); p->setRange(0,16); p->setDisplayRange(0,12);
+          p->setHint("Number of kaleidoscope mirror segments (0=off, 3+=active)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrVortexAmt");
+          p->setLabels("Vortex Swirl","Vortex Swirl","Vortex Swirl");
+          p->setDefault(0); p->setRange(0,10); p->setDisplayRange(0,5);
+          p->setHint("Radial swirl from image center");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrMeltAmt");
+          p->setLabels("Melt","Melt","Melt");
+          p->setDefault(0); p->setRange(-50,50); p->setDisplayRange(-20,20);
+          p->setHint("Vertical drip/melt distortion (negative=up, positive=down)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrGlitchAmt");
+          p->setLabels("Glitch","Glitch","Glitch");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Horizontal band displacement — digital glitch");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrGlitchBand");
+          p->setLabels("Glitch Band","Glitch Band","Glitch Band");
+          p->setDefault(3); p->setRange(0.5,20); p->setDisplayRange(1,10);
+          p->setHint("Band height for glitch effect");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrWaveFreq");
+          p->setLabels("Wave Freq","Wave Freq","Wave Freq");
+          p->setDefault(3); p->setRange(0.1,20); p->setDisplayRange(0.5,10);
+          p->setHint("Frequency of sinusoidal wave distortion");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrWaveAmp");
+          p->setLabels("Wave Amp","Wave Amp","Wave Amp");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Amplitude of wave distortion (0=off)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrChromaAb");
+          p->setLabels("Chromatic Aberration","Chromatic Aberration","Chromatic Aberration");
+          p->setDefault(0); p->setRange(0,50); p->setDisplayRange(0,20);
+          p->setHint("Full-frame RGB channel split");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrPosterize");
+          p->setLabels("Posterize","Posterize","Posterize");
+          p->setDefault(0); p->setRange(0,32); p->setDisplayRange(0,16);
+          p->setHint("Full-frame color level reduction (0=off, 4=strong)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrHueShift");
+          p->setLabels("Hue Shift","Hue Shift","Hue Shift");
+          p->setDefault(0); p->setRange(-180,180); p->setDisplayRange(-180,180);
+          p->setHint("Full-frame hue rotation (degrees)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrSolarize");
+          p->setLabels("Solarize","Solarize","Solarize");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
+          p->setHint("Full-frame solarization — invert bright pixels");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("surrColorInvert");
+          p->setLabels("Color Invert","Color Invert","Color Invert");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
+          p->setHint("Full-frame blend toward negative");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ========== DREAMCORE (full-frame atmosphere) ==========
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDreamcore");
+          g->setLabels("Dreamcore","Dreamcore","Dreamcore");
           g->setOpen(false); pg->addChild(*g);
 
           DoubleParamDescriptor* p;
