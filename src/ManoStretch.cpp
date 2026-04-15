@@ -1274,33 +1274,25 @@ public:
 
         PageParamDescriptor* pg = d.definePageParam("Controls");
 
-        // ========== MODULE ENABLES ==========
-        { GroupParamDescriptor* g = d.defineGroupParam("grpModules");
-          g->setLabels("Modules","Modules","Modules");
-          g->setOpen(true); pg->addChild(*g);
+        // ╔═══ STRETCH MODULE ═══╗
+        GroupParamDescriptor* gS = d.defineGroupParam("grpStretch");
+        gS->setLabels("Stretch","Stretch","Stretch");
+        gS->setOpen(true); pg->addChild(*gS);
 
-          BooleanParamDescriptor* b;
-          b = d.defineBooleanParam("enableStretch");
-          b->setLabels("Stretch","Stretch","Stretch");
-          b->setDefault(true);
-          b->setHint("Enable the stroke-based pixel stretch module");
-          b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
-          b = d.defineBooleanParam("enableSurrealism");
-          b->setLabels("Surrealism","Surrealism","Surrealism");
-          b->setDefault(false);
-          b->setHint("Enable full-frame surrealism distortions & color FX");
-          b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
-          b = d.defineBooleanParam("enableDreamcore");
-          b->setLabels("Dreamcore","Dreamcore","Dreamcore");
-          b->setDefault(false);
-          b->setHint("Enable full-frame atmosphere effects (vignette, grain, haze...)");
-          b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
-        }
+        // ╔═══ SURREALISM MODULE ═══╗
+        GroupParamDescriptor* gR = d.defineGroupParam("grpSurrealism");
+        gR->setLabels("Surrealism","Surrealism","Surrealism");
+        gR->setOpen(false); pg->addChild(*gR);
 
-        // ========== BRUSH SETTINGS ==========
+        // ╔═══ DREAMCORE MODULE ═══╗
+        GroupParamDescriptor* gD = d.defineGroupParam("grpDreamcore");
+        gD->setLabels("Dreamcore","Dreamcore","Dreamcore");
+        gD->setOpen(false); pg->addChild(*gD);
+
+        // ---- Stretch > Brush Settings ----
         { GroupParamDescriptor* g = d.defineGroupParam("grpBrush");
           g->setLabels("Brush Settings","Brush Settings","Brush Settings");
-          g->setOpen(true);
+          g->setOpen(true); g->setParent(*gS);
           pg->addChild(*g);
 
           ChoiceParamDescriptor* p = d.defineChoiceParam("mode");
@@ -1319,30 +1311,32 @@ public:
           p->appendOption("Dream",   "Multi-layer dreamy warp");
           p->setDefault(0); p->setAnimates(true); p->setParent(*g);
           pg->addChild(*p);
-        }
-        { DoubleParamDescriptor* p = d.defineDoubleParam("strength");
-          p->setLabels("Strength","Strength","Strength");
-          p->setDefault(80); p->setRange(0,100); p->setDisplayRange(0,100);
-          p->setHint("How much to stretch (80=organic pull, 100=extreme smear)");
-          p->setAnimates(true); pg->addChild(*p); }
-        { DoubleParamDescriptor* p = d.defineDoubleParam("radius");
-          p->setLabels("Radius","Radius","Radius");
-          p->setDefault(5); p->setRange(0.5,50); p->setDisplayRange(0.5,30);
-          p->setHint("[ ] keys to adjust"); p->setAnimates(true); pg->addChild(*p); }
-        { DoubleParamDescriptor* p = d.defineDoubleParam("startBlend");
-          p->setLabels("Start Blend","Start Blend","Start Blend");
-          p->setDefault(0.15); p->setRange(0,0.5); p->setDisplayRange(0,0.5);
-          p->setHint("Soft ramp-up at the stretch origin (0=sharp, 0.5=half-length fade-in)");
-          p->setAnimates(true); pg->addChild(*p); }
-        { DoubleParamDescriptor* p = d.defineDoubleParam("fade");
-          p->setLabels("End Fade","End Fade","End Fade");
-          p->setDefault(0.3); p->setRange(0,1); p->setDisplayRange(0,1);
-          p->setHint("Fade-out at the stretch end"); p->setAnimates(true); pg->addChild(*p); }
 
-        // ========== COLOR LOCK (content-aware stretch) ==========
+          DoubleParamDescriptor* dp;
+          dp = d.defineDoubleParam("strength");
+          dp->setLabels("Strength","Strength","Strength");
+          dp->setDefault(80); dp->setRange(0,100); dp->setDisplayRange(0,100);
+          dp->setHint("How much to stretch (80=organic pull, 100=extreme smear)");
+          dp->setAnimates(true); dp->setParent(*g); pg->addChild(*dp);
+          dp = d.defineDoubleParam("radius");
+          dp->setLabels("Radius","Radius","Radius");
+          dp->setDefault(5); dp->setRange(0.5,50); dp->setDisplayRange(0.5,30);
+          dp->setHint("[ ] keys to adjust"); dp->setAnimates(true); dp->setParent(*g); pg->addChild(*dp);
+          dp = d.defineDoubleParam("startBlend");
+          dp->setLabels("Start Blend","Start Blend","Start Blend");
+          dp->setDefault(0.15); dp->setRange(0,0.5); dp->setDisplayRange(0,0.5);
+          dp->setHint("Soft ramp-up at the stretch origin (0=sharp, 0.5=half-length fade-in)");
+          dp->setAnimates(true); dp->setParent(*g); pg->addChild(*dp);
+          dp = d.defineDoubleParam("fade");
+          dp->setLabels("End Fade","End Fade","End Fade");
+          dp->setDefault(0.3); dp->setRange(0,1); dp->setDisplayRange(0,1);
+          dp->setHint("Fade-out at the stretch end"); dp->setAnimates(true); dp->setParent(*g); pg->addChild(*dp);
+        }
+
+        // ---- Stretch > Color Lock ----
         { GroupParamDescriptor* g = d.defineGroupParam("grpColorLock");
           g->setLabels("Color Lock","Color Lock","Color Lock");
-          g->setOpen(false); pg->addChild(*g);
+          g->setOpen(false); g->setParent(*gS); pg->addChild(*g);
 
           DoubleParamDescriptor* p;
           p = d.defineDoubleParam("colorLock");
@@ -1357,10 +1351,10 @@ public:
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
-        // ========== COLOURMAN ==========
+        // ---- Stretch > Colourman ----
         { GroupParamDescriptor* g = d.defineGroupParam("grpColourman");
           g->setLabels("Colourman","Colourman","Colourman");
-          g->setOpen(false); pg->addChild(*g);
+          g->setOpen(false); g->setParent(*gS); pg->addChild(*g);
 
           RGBParamDescriptor* c = d.defineRGBParam("tintColor");
           c->setLabels("Tint Color","Tint Color","Tint Color");
@@ -1373,10 +1367,10 @@ public:
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
-        // ========== MODE DETAIL ==========
+        // ---- Stretch > Mode Detail ----
         { GroupParamDescriptor* g = d.defineGroupParam("grpDetail");
           g->setLabels("Mode Detail","Mode Detail","Mode Detail");
-          g->setOpen(false); pg->addChild(*g);
+          g->setOpen(false); g->setParent(*gS); pg->addChild(*g);
 
           DoubleParamDescriptor* p;
           p = d.defineDoubleParam("param1");
@@ -1390,10 +1384,10 @@ public:
           p->setHint("Wave:amp | Melt:amt | Fractal:iters | Glitch:amt | Dream:amp"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
-        // ========== POST FX (editable after stretching) ==========
+        // ---- Stretch > Post FX ----
         { GroupParamDescriptor* g = d.defineGroupParam("grpPostFX");
           g->setLabels("Post FX","Post FX","Post FX");
-          g->setOpen(true); pg->addChild(*g);
+          g->setOpen(false); g->setParent(*gS); pg->addChild(*g);
 
           DoubleParamDescriptor* p;
           p = d.defineDoubleParam("postOpacity");
@@ -1423,10 +1417,10 @@ public:
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
-        // ========== LIQUIDIFY ==========
+        // ---- Stretch > Liquidify ----
         { GroupParamDescriptor* g = d.defineGroupParam("grpLiquidify");
           g->setLabels("Liquidify","Liquidify","Liquidify");
-          g->setOpen(false); pg->addChild(*g);
+          g->setOpen(false); g->setParent(*gS); pg->addChild(*g);
 
           DoubleParamDescriptor* p;
           p = d.defineDoubleParam("liqAmount");
@@ -1441,10 +1435,10 @@ public:
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
-        // ========== ANIMATION (keyframeable for video!) ==========
+        // ---- Stretch > Animation ----
         { GroupParamDescriptor* g = d.defineGroupParam("grpAnimation");
           g->setLabels("Animation","Animation","Animation");
-          g->setOpen(true); pg->addChild(*g);
+          g->setOpen(false); g->setParent(*gS); pg->addChild(*g);
 
           DoubleParamDescriptor* p;
           p = d.defineDoubleParam("animProgress");
@@ -1484,10 +1478,10 @@ public:
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
-        // ========== SURREAL PER-STROKE FX ==========
+        // ---- Stretch > Per-Stroke FX ----
         { GroupParamDescriptor* g = d.defineGroupParam("grpSurrealFX");
-          g->setLabels("Surreal FX","Surreal FX","Surreal FX");
-          g->setOpen(false); pg->addChild(*g);
+          g->setLabels("Per-Stroke FX","Per-Stroke FX","Per-Stroke FX");
+          g->setOpen(false); g->setParent(*gS); pg->addChild(*g);
 
           DoubleParamDescriptor* p;
           p = d.defineDoubleParam("chromaAb");
@@ -1516,22 +1510,37 @@ public:
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
-        // ========== SURREALISM MODULE (full-frame distortions & color) ==========
-        { GroupParamDescriptor* g = d.defineGroupParam("grpSurrealism");
-          g->setLabels("Surrealism","Surrealism","Surrealism");
-          g->setOpen(false); pg->addChild(*g);
+        // ---- Enable Stretch (at bottom) ----
+        { BooleanParamDescriptor* b = d.defineBooleanParam("enableStretch");
+          b->setLabels("Enable Stretch","Enable Stretch","Enable Stretch");
+          b->setDefault(true);
+          b->setHint("Enable the stroke-based pixel stretch module");
+          b->setAnimates(false); b->setParent(*gS); pg->addChild(*b); }
+
+        // ---- Surrealism > Fractal Warp ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpSurrFractal");
+          g->setLabels("Fractal Warp","Fractal Warp","Fractal Warp");
+          g->setOpen(false); g->setParent(*gR); pg->addChild(*g);
 
           DoubleParamDescriptor* p;
           p = d.defineDoubleParam("surrFractalAmt");
-          p->setLabels("Fractal Warp","Fractal Warp","Fractal Warp");
+          p->setLabels("Amount","Amount","Amount");
           p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
           p->setHint("Iterative sinusoidal warp — organic fractal distortion");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
           p = d.defineDoubleParam("surrFractalScale");
-          p->setLabels("Fractal Scale","Fractal Scale","Fractal Scale");
+          p->setLabels("Scale","Scale","Scale");
           p->setDefault(5); p->setRange(0.1,50); p->setDisplayRange(0.5,20);
           p->setHint("Scale/frequency of fractal warp");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Surrealism > Spatial Distortions ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpSurrSpatial");
+          g->setLabels("Spatial Distortions","Spatial Distortions","Spatial Distortions");
+          g->setOpen(false); g->setParent(*gR); pg->addChild(*g);
+
+          DoubleParamDescriptor* p;
           p = d.defineDoubleParam("surrKaleidoSegs");
           p->setLabels("Kaleidoscope","Kaleidoscope","Kaleidoscope");
           p->setDefault(0); p->setRange(0,16); p->setDisplayRange(0,12);
@@ -1547,26 +1556,50 @@ public:
           p->setDefault(0); p->setRange(-50,50); p->setDisplayRange(-20,20);
           p->setHint("Vertical drip/melt distortion (negative=up, positive=down)");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Surrealism > Glitch ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpSurrGlitch");
+          g->setLabels("Glitch","Glitch","Glitch");
+          g->setOpen(false); g->setParent(*gR); pg->addChild(*g);
+
+          DoubleParamDescriptor* p;
           p = d.defineDoubleParam("surrGlitchAmt");
-          p->setLabels("Glitch","Glitch","Glitch");
+          p->setLabels("Amount","Amount","Amount");
           p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
           p->setHint("Horizontal band displacement — digital glitch");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
           p = d.defineDoubleParam("surrGlitchBand");
-          p->setLabels("Glitch Band","Glitch Band","Glitch Band");
+          p->setLabels("Band Height","Band Height","Band Height");
           p->setDefault(3); p->setRange(0.5,20); p->setDisplayRange(1,10);
           p->setHint("Band height for glitch effect");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Surrealism > Wave ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpSurrWave");
+          g->setLabels("Wave","Wave","Wave");
+          g->setOpen(false); g->setParent(*gR); pg->addChild(*g);
+
+          DoubleParamDescriptor* p;
           p = d.defineDoubleParam("surrWaveFreq");
-          p->setLabels("Wave Freq","Wave Freq","Wave Freq");
+          p->setLabels("Frequency","Frequency","Frequency");
           p->setDefault(3); p->setRange(0.1,20); p->setDisplayRange(0.5,10);
           p->setHint("Frequency of sinusoidal wave distortion");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
           p = d.defineDoubleParam("surrWaveAmp");
-          p->setLabels("Wave Amp","Wave Amp","Wave Amp");
+          p->setLabels("Amplitude","Amplitude","Amplitude");
           p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
           p->setHint("Amplitude of wave distortion (0=off)");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Surrealism > Color FX ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpSurrColor");
+          g->setLabels("Color FX","Color FX","Color FX");
+          g->setOpen(false); g->setParent(*gR); pg->addChild(*g);
+
+          DoubleParamDescriptor* p;
           p = d.defineDoubleParam("surrChromaAb");
           p->setLabels("Chromatic Aberration","Chromatic Aberration","Chromatic Aberration");
           p->setDefault(0); p->setRange(0,50); p->setDisplayRange(0,20);
@@ -1594,10 +1627,17 @@ public:
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
-        // ========== DREAMCORE (full-frame atmosphere) ==========
-        { GroupParamDescriptor* g = d.defineGroupParam("grpDreamcore");
-          g->setLabels("Dreamcore","Dreamcore","Dreamcore");
-          g->setOpen(false); pg->addChild(*g);
+        // ---- Enable Surrealism (at bottom of Surrealism group) ----
+        { BooleanParamDescriptor* b = d.defineBooleanParam("enableSurrealism");
+          b->setLabels("Enable Surrealism","Enable Surrealism","Enable Surrealism");
+          b->setDefault(false);
+          b->setHint("Enable full-frame surrealism distortions & color FX");
+          b->setAnimates(false); b->setParent(*gR); pg->addChild(*b); }
+
+        // ---- Dreamcore > Atmosphere ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDcAtmos");
+          g->setLabels("Atmosphere","Atmosphere","Atmosphere");
+          g->setOpen(false); g->setParent(*gD); pg->addChild(*g);
 
           DoubleParamDescriptor* p;
           p = d.defineDoubleParam("vignette");
@@ -1605,6 +1645,19 @@ public:
           p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
           p->setHint("Darken image edges for moody atmosphere");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("dreamHaze");
+          p->setLabels("Dream Haze","Dream Haze","Dream Haze");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Luminance-based glow for dreamy atmosphere");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Dreamcore > Retro FX ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDcRetro");
+          g->setLabels("Retro FX","Retro FX","Retro FX");
+          g->setOpen(false); g->setParent(*gD); pg->addChild(*g);
+
+          DoubleParamDescriptor* p;
           p = d.defineDoubleParam("grain");
           p->setLabels("Film Grain","Film Grain","Film Grain");
           p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
@@ -1615,20 +1668,23 @@ public:
           p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
           p->setHint("Horizontal retro scanline overlay");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
-          p = d.defineDoubleParam("dreamHaze");
-          p->setLabels("Dream Haze","Dream Haze","Dream Haze");
-          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
-          p->setHint("Luminance-based glow for dreamy atmosphere");
-          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
-          p = d.defineDoubleParam("globalHueShift");
-          p->setLabels("Global Hue Shift","Global Hue Shift","Global Hue Shift");
-          p->setDefault(0); p->setRange(-180,180); p->setDisplayRange(-180,180);
-          p->setHint("Rotate entire image hue — keyframe for psychedelic cycling");
-          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
           p = d.defineDoubleParam("pixelate");
           p->setLabels("Pixelate","Pixelate","Pixelate");
           p->setDefault(0); p->setRange(0,64); p->setDisplayRange(0,32);
           p->setHint("Block size for retro pixelation (0=off)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Dreamcore > Color ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDcColor");
+          g->setLabels("Color","Color","Color");
+          g->setOpen(false); g->setParent(*gD); pg->addChild(*g);
+
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("globalHueShift");
+          p->setLabels("Global Hue Shift","Global Hue Shift","Global Hue Shift");
+          p->setDefault(0); p->setRange(-180,180); p->setDisplayRange(-180,180);
+          p->setHint("Rotate entire image hue — keyframe for psychedelic cycling");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
           p = d.defineDoubleParam("mirrorGlobal");
           p->setLabels("Global Mirror","Global Mirror","Global Mirror");
@@ -1636,6 +1692,13 @@ public:
           p->setHint("Mirror the image horizontally (0=off, 1=on)");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
+
+        // ---- Enable Dreamcore (at bottom of Dreamcore group) ----
+        { BooleanParamDescriptor* b = d.defineBooleanParam("enableDreamcore");
+          b->setLabels("Enable Dreamcore","Enable Dreamcore","Enable Dreamcore");
+          b->setDefault(false);
+          b->setHint("Enable full-frame atmosphere effects (vignette, grain, haze...)");
+          b->setAnimates(false); b->setParent(*gD); pg->addChild(*b); }
 
         // ========== HIDDEN ==========
         { StringParamDescriptor* p = d.defineStringParam("_strokeData");
