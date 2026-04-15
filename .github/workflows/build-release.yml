@@ -18,7 +18,8 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.30
         with:
           cuda: '12.5.0'
-          method: 'network'
+          method: 'local'
+          sub-packages: '["nvcc", "cudart"]'
 
       - name: Configure CMake
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
