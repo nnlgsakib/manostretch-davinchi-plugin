@@ -462,7 +462,9 @@ __global__ void surrealismKernel(const float* srcCopy, float* dst, int w, int h,
     float fractalAmt, float fractalScale, float kaleidoSegs,
     float vortexAmt, float meltAmt, float glitchAmt, float glitchBand,
     float waveFreq, float waveAmp, float chromaAb, float posterize,
-    float hueShift, float solarize, float colorInvert, float time)
+    float hueShift, float solarize, float colorInvert, float time,
+    float spatialSpinSpeed, float spatialKaleidoRotate,
+    float spatialMeltPulse, float spatialMeltPulseFreq, float spatialEvolveSpeed)
 {
     int px = blockIdx.x * blockDim.x + threadIdx.x;
     int py = blockIdx.y * blockDim.y + threadIdx.y;
@@ -472,10 +474,12 @@ __global__ void surrealismKernel(const float* srcCopy, float* dst, int w, int h,
     float srcX = lx, srcY = ly;
     float cx = w * 0.5f, cy = h * 0.5f;
 
-    // Kaleidoscope
+    // Kaleidoscope (+ animated rotation)
     if (kaleidoSegs > 1.5f) {
         float dx = srcX - cx, dy = srcY - cy;
         float ang = atan2f(dy, dx);
+        if (fabsf(spatialKaleidoRotate) > 0.001f)
+            ang -= spatialKaleidoRotate * time * 0.15f;
         float segs = floorf(kaleidoSegs);
         float sector = 6.2832f / segs;
         float angM = fmodf(fabsf(ang), sector);
@@ -485,33 +489,47 @@ __global__ void surrealismKernel(const float* srcCopy, float* dst, int w, int h,
         srcY = cy + rr * sinf(angM);
     }
 
-    // Vortex swirl
-    if (vortexAmt > 0.01f) {
+    // Vortex swirl (+ animated spin)
+    if (vortexAmt > 0.01f || fabsf(spatialSpinSpeed) > 0.001f) {
         float dx = srcX - cx, dy = srcY - cy;
         float dist = sqrtf(dx*dx + dy*dy);
         float maxR = fmaxf((float)w, (float)h) * 0.5f;
         float falloff = (dist < maxR) ? (1.f - dist/maxR) : 0.f;
         float angle = vortexAmt * falloff * falloff * 6.2832f;
+        angle += spatialSpinSpeed * time * 0.15f * falloff;
         float cs = cosf(angle), sn = sinf(angle);
         srcX = cx + dx*cs - dy*sn;
         srcY = cy + dx*sn + dy*cs;
     }
 
-    // Fractal warp
+    // Fractal warp (evolve speeds up time)
     if (fractalAmt > 0.01f) {
         float scale = fractalScale * 0.02f;
+        float et = time * (1.f + spatialEvolveSpeed);
         float ffx = srcX, ffy = srcY;
         for (int it = 0; it < 4; it++) {
-            ffx += sinf(ffy * scale + time * 0.3f) * fractalAmt;
-            ffy += cosf(ffx * scale + time * 0.2f) * fractalAmt;
+            ffx += sinf(ffy * scale + et * 0.3f) * fractalAmt;
+            ffy += cosf(ffx * scale + et * 0.2f) * fractalAmt;
         }
         srcX = ffx; srcY = ffy;
     }
 
-    // Melt
-    if (fabsf(meltAmt) > 0.01f) {
+    // General evolve displacement
+    if (spatialEvolveSpeed > 0.01f) {
+        float evT = time * spatialEvolveSpeed * 0.7f;
+        float evAmt = spatialEvolveSpeed * 3.f;
+        srcX += sinf(ly * 0.05f + evT) * evAmt;
+        srcY += cosf(lx * 0.05f + evT * 0.7f) * evAmt;
+    }
+
+    // Melt (+ animated pulse)
+    { float melt = meltAmt;
+      if (spatialMeltPulse > 0.01f)
+          melt += spatialMeltPulse * sinf(time * spatialMeltPulseFreq * 0.3f);
+      if (fabsf(melt) > 0.01f) {
         float ny = ly / (float)h;
-        srcY -= meltAmt * ny * ny * (float)h * 0.1f;
+        srcY -= melt * ny * ny * (float)h * 0.1f;
+      }
     }
 
     // Glitch
@@ -582,11 +600,16 @@ extern "C" void RunCudaSurrealismPass(
     float fractalAmt, float fractalScale, float kaleidoSegs,
     float vortexAmt, float meltAmt, float glitchAmt, float glitchBand,
     float waveFreq, float waveAmp, float chromaAb, float posterize,
-    float hueShift, float solarize, float colorInvert, float time)
+    float hueShift, float solarize, float colorInvert, float time,
+    float spatialSpinSpeed, float spatialKaleidoRotate,
+    float spatialMeltPulse, float spatialMeltPulseFreq, float spatialEvolveSpeed)
 {
     bool hasDist = fractalAmt > 0.01f || kaleidoSegs > 1.5f
                 || vortexAmt > 0.01f || fabsf(meltAmt) > 0.01f
-                || glitchAmt > 0.01f || waveAmp > 0.01f;
+                || glitchAmt > 0.01f || waveAmp > 0.01f
+                || fabsf(spatialSpinSpeed) > 0.001f
+                || spatialMeltPulse > 0.01f
+                || spatialEvolveSpeed > 0.01f;
     bool hasColor = chromaAb > 0.01f || posterize > 1.5f
                  || fabsf(hueShift) > 0.001f || solarize > 0.01f
                  || colorInvert > 0.01f;
@@ -605,7 +628,9 @@ extern "C" void RunCudaSurrealismPass(
         fractalAmt, fractalScale, kaleidoSegs,
         vortexAmt, meltAmt, glitchAmt, glitchBand,
         waveFreq, waveAmp, chromaAb, posterize,
-        hueShift, solarize, colorInvert, time);
+        hueShift, solarize, colorInvert, time,
+        spatialSpinSpeed, spatialKaleidoRotate,
+        spatialMeltPulse, spatialMeltPulseFreq, spatialEvolveSpeed);
 
     cudaFree(tmp);
 }

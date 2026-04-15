@@ -70,7 +70,9 @@ extern "C" void RunCudaSurrealismPass(void* stream, float* dst,
     float glitchAmt, float glitchBand,
     float waveFreq, float waveAmp,
     float chromaAb, float posterize, float hueShift,
-    float solarize, float colorInvert, float time);
+    float solarize, float colorInvert, float time,
+    float spatialSpinSpeed, float spatialKaleidoRotate,
+    float spatialMeltPulse, float spatialMeltPulseFreq, float spatialEvolveSpeed);
 #endif
 
 enum StretchMode { eLinear=0, eSpiral=1, eWave=2, eTaper=3, eSmear=4, eShatter=5,
@@ -591,6 +593,10 @@ struct SurrealismFX {
     float hueShift;
     float solarize;
     float colorInvert;
+    float spatialSpinSpeed;
+    float spatialKaleidoRotate;
+    float spatialMeltPulse, spatialMeltPulseFreq;
+    float spatialEvolveSpeed;
     float time;
 };
 
@@ -599,7 +605,10 @@ static void cpuSurrealismPass(void* dstBase, const OfxRectI& dB, int dRB,
 {
     bool hasDist = sfx.fractalAmt > 0.01f || sfx.kaleidoSegs > 1.5f
                 || sfx.vortexAmt > 0.01f || std::abs(sfx.meltAmt) > 0.01f
-                || sfx.glitchAmt > 0.01f || sfx.waveAmp > 0.01f;
+                || sfx.glitchAmt > 0.01f || sfx.waveAmp > 0.01f
+                || std::abs(sfx.spatialSpinSpeed) > 0.001f
+                || sfx.spatialMeltPulse > 0.01f
+                || sfx.spatialEvolveSpeed > 0.01f;
     bool hasColor = sfx.chromaAb > 0.01f || sfx.posterize > 1.5f
                  || std::abs(sfx.hueShift) > 0.001f || sfx.solarize > 0.01f
                  || sfx.colorInvert > 0.01f;
@@ -622,10 +631,12 @@ static void cpuSurrealismPass(void* dstBase, const OfxRectI& dB, int dRB,
         float lx = (float)(px - dB.x1), ly = (float)(py - dB.y1);
         float srcX = lx, srcY = ly;
 
-        // Kaleidoscope — mirror fold around center
+        // Kaleidoscope — mirror fold around center (+ animated rotation)
         if (sfx.kaleidoSegs > 1.5f) {
             float dx = srcX - cx, dy = srcY - cy;
             float ang = std::atan2(dy, dx);
+            if (std::abs(sfx.spatialKaleidoRotate) > 0.001f)
+                ang -= sfx.spatialKaleidoRotate * sfx.time * 0.15f;
             float segs = std::floor(sfx.kaleidoSegs);
             float sector = (float)(2.0*M_PI) / segs;
             float angM = std::fmod(std::abs(ang), sector);
@@ -635,33 +646,47 @@ static void cpuSurrealismPass(void* dstBase, const OfxRectI& dB, int dRB,
             srcY = cy + rr * std::sin(angM);
         }
 
-        // Vortex swirl — radial rotation from center
-        if (sfx.vortexAmt > 0.01f) {
+        // Vortex swirl — radial rotation from center (+ animated spin)
+        if (sfx.vortexAmt > 0.01f || std::abs(sfx.spatialSpinSpeed) > 0.001f) {
             float dx = srcX - cx, dy = srcY - cy;
             float dist = std::sqrt(dx*dx + dy*dy);
             float maxR = (std::max)((float)w, (float)h) * 0.5f;
             float falloff = (dist < maxR) ? (1.f - dist/maxR) : 0.f;
             float angle = sfx.vortexAmt * falloff * falloff * (float)(2.0*M_PI);
+            angle += sfx.spatialSpinSpeed * sfx.time * 0.15f * falloff;
             float cs = std::cos(angle), sn = std::sin(angle);
             srcX = cx + dx*cs - dy*sn;
             srcY = cy + dx*sn + dy*cs;
         }
 
-        // Fractal warp — iterative sinusoidal displacement
+        // Fractal warp — iterative sinusoidal displacement (evolve speeds up time)
         if (sfx.fractalAmt > 0.01f) {
             float scale = sfx.fractalScale * 0.02f;
+            float et = sfx.time * (1.f + sfx.spatialEvolveSpeed);
             float ffx = srcX, ffy = srcY;
             for (int it = 0; it < 4; it++) {
-                ffx += std::sin(ffy * scale + sfx.time * 0.3f) * sfx.fractalAmt;
-                ffy += std::cos(ffx * scale + sfx.time * 0.2f) * sfx.fractalAmt;
+                ffx += std::sin(ffy * scale + et * 0.3f) * sfx.fractalAmt;
+                ffy += std::cos(ffx * scale + et * 0.2f) * sfx.fractalAmt;
             }
             srcX = ffx; srcY = ffy;
         }
 
-        // Melt — vertical drip based on position
-        if (std::abs(sfx.meltAmt) > 0.01f) {
+        // General evolve displacement
+        if (sfx.spatialEvolveSpeed > 0.01f) {
+            float evT = sfx.time * sfx.spatialEvolveSpeed * 0.7f;
+            float evAmt = sfx.spatialEvolveSpeed * 3.f;
+            srcX += std::sin(ly * 0.05f + evT) * evAmt;
+            srcY += std::cos(lx * 0.05f + evT * 0.7f) * evAmt;
+        }
+
+        // Melt — vertical drip based on position (+ animated pulse)
+        { float melt = sfx.meltAmt;
+          if (sfx.spatialMeltPulse > 0.01f)
+              melt += sfx.spatialMeltPulse * std::sin(sfx.time * sfx.spatialMeltPulseFreq * 0.3f);
+          if (std::abs(melt) > 0.01f) {
             float ny = ly / (float)h;
-            srcY -= sfx.meltAmt * ny * ny * (float)h * 0.1f;
+            srcY -= melt * ny * ny * (float)h * 0.1f;
+          }
         }
 
         // Glitch — horizontal band displacement
@@ -785,6 +810,12 @@ public:
         m_SurrHueShift     = fetchDoubleParam("surrHueShift");
         m_SurrSolarize     = fetchDoubleParam("surrSolarize");
         m_SurrColorInvert  = fetchDoubleParam("surrColorInvert");
+        // Spatial animation params
+        m_SurrSpatialSpinSpeed     = fetchDoubleParam("surrSpatialSpinSpeed");
+        m_SurrSpatialKaleidoRotate = fetchDoubleParam("surrSpatialKaleidoRotate");
+        m_SurrSpatialMeltPulse     = fetchDoubleParam("surrSpatialMeltPulse");
+        m_SurrSpatialMeltPulseFreq = fetchDoubleParam("surrSpatialMeltPulseFreq");
+        m_SurrSpatialEvolveSpeed   = fetchDoubleParam("surrSpatialEvolveSpeed");
     }
 
     virtual void render(const RenderArguments& a) {
@@ -862,6 +893,12 @@ public:
             m_SurrHueShift->getValueAtTime(a.time, v);      sfx.hueShift     = (float)(v * M_PI / 180.0);
             m_SurrSolarize->getValueAtTime(a.time, v);      sfx.solarize     = (float)(v / 100.0);
             m_SurrColorInvert->getValueAtTime(a.time, v);   sfx.colorInvert  = (float)(v / 100.0);
+            // Spatial animation
+            m_SurrSpatialSpinSpeed->getValueAtTime(a.time, v);     sfx.spatialSpinSpeed     = (float)v;
+            m_SurrSpatialKaleidoRotate->getValueAtTime(a.time, v); sfx.spatialKaleidoRotate = (float)v;
+            m_SurrSpatialMeltPulse->getValueAtTime(a.time, v);     sfx.spatialMeltPulse     = (float)v;
+            m_SurrSpatialMeltPulseFreq->getValueAtTime(a.time, v); sfx.spatialMeltPulseFreq = (float)v;
+            m_SurrSpatialEvolveSpeed->getValueAtTime(a.time, v);   sfx.spatialEvolveSpeed   = (float)v;
         }
 
         double rsx=a.renderScale.x, rsy=a.renderScale.y;
@@ -895,7 +932,9 @@ public:
                     sfx.fractalAmt, sfx.fractalScale, sfx.kaleidoSegs,
                     sfx.vortexAmt, sfx.meltAmt, sfx.glitchAmt, sfx.glitchBand,
                     sfx.waveFreq, sfx.waveAmp, sfx.chromaAb, sfx.posterize,
-                    sfx.hueShift, sfx.solarize, sfx.colorInvert, sfx.time);
+                    sfx.hueShift, sfx.solarize, sfx.colorInvert, sfx.time,
+                    sfx.spatialSpinSpeed, sfx.spatialKaleidoRotate,
+                    sfx.spatialMeltPulse, sfx.spatialMeltPulseFreq, sfx.spatialEvolveSpeed);
             }
             if (bDreamcore) {
                 RunCudaGlobalFX(a.pCudaStream, dD, w, h,
@@ -966,6 +1005,10 @@ private:
     DoubleParam *m_SurrWaveFreq, *m_SurrWaveAmp;
     DoubleParam *m_SurrChromaAb, *m_SurrPosterize, *m_SurrHueShift;
     DoubleParam *m_SurrSolarize, *m_SurrColorInvert;
+    DoubleParam *m_SurrSpatialSpinSpeed, *m_SurrSpatialKaleidoRotate;
+    DoubleParam *m_SurrSpatialMeltPulse, *m_SurrSpatialMeltPulseFreq;
+    DoubleParam *m_SurrSpatialEvolveSpeed;
+
 };
 
 //  Overlay Interact
@@ -1556,6 +1599,39 @@ public:
           p->setDefault(0); p->setRange(-50,50); p->setDisplayRange(-20,20);
           p->setHint("Vertical drip/melt distortion (negative=up, positive=down)");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+
+          // ---- Spatial Distortions > Animation ----
+          { GroupParamDescriptor* ga = d.defineGroupParam("grpSurrSpatialAnim");
+            ga->setLabels("Animation","Animation","Animation");
+            ga->setOpen(false); ga->setParent(*g); pg->addChild(*ga);
+
+            DoubleParamDescriptor* a;
+            a = d.defineDoubleParam("surrSpatialSpinSpeed");
+            a->setLabels("Spin Speed","Spin Speed","Spin Speed");
+            a->setDefault(0); a->setRange(-5,5); a->setDisplayRange(-2,2);
+            a->setHint("Auto-rotate vortex swirl over time (turns/sec, negative=reverse)");
+            a->setAnimates(true); a->setParent(*ga); pg->addChild(*a);
+            a = d.defineDoubleParam("surrSpatialKaleidoRotate");
+            a->setLabels("Kaleido Rotate","Kaleido Rotate","Kaleido Rotate");
+            a->setDefault(0); a->setRange(-5,5); a->setDisplayRange(-2,2);
+            a->setHint("Auto-rotate kaleidoscope pattern over time (turns/sec)");
+            a->setAnimates(true); a->setParent(*ga); pg->addChild(*a);
+            a = d.defineDoubleParam("surrSpatialMeltPulse");
+            a->setLabels("Melt Pulse","Melt Pulse","Melt Pulse");
+            a->setDefault(0); a->setRange(0,100); a->setDisplayRange(0,50);
+            a->setHint("Oscillating melt intensity — breathing drip effect");
+            a->setAnimates(true); a->setParent(*ga); pg->addChild(*a);
+            a = d.defineDoubleParam("surrSpatialMeltPulseFreq");
+            a->setLabels("Melt Pulse Speed","Melt Pulse Speed","Melt Pulse Speed");
+            a->setDefault(1); a->setRange(0.1,10); a->setDisplayRange(0.1,5);
+            a->setHint("Frequency of melt pulse in cycles per second");
+            a->setAnimates(true); a->setParent(*ga); pg->addChild(*a);
+            a = d.defineDoubleParam("surrSpatialEvolveSpeed");
+            a->setLabels("Evolve Speed","Evolve Speed","Evolve Speed");
+            a->setDefault(0); a->setRange(0,10); a->setDisplayRange(0,5);
+            a->setHint("Time-evolving noise offset for all spatial distortions");
+            a->setAnimates(true); a->setParent(*ga); pg->addChild(*a);
+          }
         }
 
         // ---- Surrealism > Glitch ----
