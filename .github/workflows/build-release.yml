@@ -8,29 +8,65 @@ on:
 permissions:
   contents: write
 
+env:
+  CUDA_VERSION: "12.5"
+  CUDA_PATCH: "12.5.82"
+
 jobs:
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.30
-        with:
-          cuda: '12.5.0'
-          method: 'local'
-          sub-packages: '["nvcc", "cudart"]'
+      # Download CUDA compiler + runtime as portable ZIPs (no installer = no hang)
+      - name: Setup CUDA (portable redist)
+        shell: pwsh
+        run: |
+          $cudaPath = "C:\cuda"
+          New-Item -ItemType Directory -Force -Path $cudaPath | Out-Null
+          $base = "https://developer.download.nvidia.com/compute/cuda/redist"
+          $v = "${{ env.CUDA_PATCH }}"
+
+          $components = @(
+            "cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-${v}-archive.zip",
+            "cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-${v}-archive.zip"
+          )
+
+          foreach ($comp in $components) {
+            $name = $comp.Split("/")[0]
+            $url = "${base}/${comp}"
+            $zip = "$env:TEMP\${name}.zip"
+            Write-Host "Downloading ${name}..."
+            Invoke-WebRequest $url -OutFile $zip -UseBasicParsing
+            $tmp = "$env:TEMP\extract_${name}"
+            Expand-Archive $zip -DestinationPath $tmp -Force
+            $archDir = Get-ChildItem $tmp -Directory | Select-Object -First 1
+            Copy-Item "$($archDir.FullName)\*" -Destination $cudaPath -Recurse -Force
+            Write-Host "  -> extracted to $cudaPath"
+          }
+
+          # Verify nvcc
+          & "$cudaPath\bin\nvcc.exe" --version
+
+          # Export for CMake
+          echo "CUDA_PATH=$cudaPath" >> $env:GITHUB_ENV
+          echo "$cudaPath\bin" >> $env:GITHUB_PATH
 
       - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        shell: pwsh
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release `
+            -DNVCC_EXECUTABLE="C:/cuda/bin/nvcc.exe"
 
       - name: Build
         run: cmake --build build --config Release
 
-      - name: List artifacts
+      - name: Verify artifacts
+        shell: pwsh
         run: |
-          dir build\Release\ManoStretch.ofx
-          dir build\Release\ManoStretch_Installer.exe
+          if (!(Test-Path build\Release\ManoStretch.ofx)) { throw "ManoStretch.ofx not found" }
+          if (!(Test-Path build\Release\ManoStretch_Installer.exe)) { throw "Installer not found" }
+          Get-Item build\Release\ManoStretch.ofx, build\Release\ManoStretch_Installer.exe | Format-Table Name, Length
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
