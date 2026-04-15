@@ -1,0 +1,72 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.17
+        with:
+          cuda: '12.6.0'
+          method: 'network'
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: List artifacts
+        run: |
+          dir build\Release\ManoStretch.ofx
+          dir build\Release\ManoStretch_Installer.exe
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ManoStretch-Windows
+          path: |
+            build/Release/ManoStretch.ofx
+            build/Release/ManoStretch_Installer.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ManoStretch ${{ github.ref_name }}
+          body: |
+            ## ManoStretch ${{ github.ref_name }} — Pixel Stretch Plugin for DaVinci Resolve
+
+            ### Features
+            - 6 stretch modes: Linear, Spiral, Wave, Taper, Smear, Shatter
+            - Displacement warp algorithm — organic face-pull effect
+            - Soft start blending at stretch origin
+            - Post FX: global opacity, brightness, saturation (editable after drawing)
+            - Liquidify: sinusoidal distortion on stretched pixels
+            - Color tinting with RGB multipliers
+            - Undo/redo support via stroke serialization
+            - CUDA GPU acceleration with CPU fallback
+            - All parameters keyframeable
+
+            ### Downloads
+            - `ManoStretch_Installer.exe` — auto-detects DaVinci Resolve and installs
+            - `ManoStretch.ofx` — manual install to `C:\Program Files\Common Files\OFX\Plugins\`
+
+            ### Requirements
+            - Windows 10/11
+            - DaVinci Resolve 18+ (Free or Studio)
+            - NVIDIA GPU recommended (CUDA 12.x)
+          files: |
+            build/Release/ManoStretch.ofx
+            build/Release/ManoStretch_Installer.exe
+          draft: false
+          prerelease: false
