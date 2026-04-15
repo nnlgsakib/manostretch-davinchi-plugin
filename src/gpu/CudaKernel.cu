@@ -33,6 +33,7 @@ __device__ float smoothstep(float t) {
 }
 
 // Modes: 0=Linear 1=Spiral 2=Wave 3=Taper 4=Smear 5=Shatter
+//        6=Mirror 7=Melt 8=Vortex 9=Fractal 10=Glitch 11=Dream
 //
 // DISPLACEMENT-BASED STRETCH:  pixels are displaced BACKWARD along
 // the drag vector.  Near the start → small displacement (face stays).
@@ -49,7 +50,8 @@ __global__ void stretchKernel(
     float liqAmount, float liqScale,
     float animProgress, float animGrow, float animEvolve, float animEvolveSpeed,
     float animPulse, float animPulseFreq, float animWobble, float time,
-    float colorLock, float colorTolerance)
+    float colorLock, float colorTolerance,
+    float chromaAb, float posterize, float hueShift, float solarize, float colorInvert)
 {
     int px = blockIdx.x * blockDim.x + threadIdx.x;
     int py = blockIdx.y * blockDim.y + threadIdx.y;
@@ -173,6 +175,65 @@ __global__ void stretchKernel(
             srcFy += scatter * perpY * effect;
             break;
         }
+        case 6: { // Mirror — kaleidoscopic
+            float segs = fmaxf(1.f, floorf(param1));
+            float angOrig = atan2f(d, fmaxf(0.001f, t));
+            float sector = 6.2832f / segs;
+            float angMir = fmodf(fabsf(angOrig), sector);
+            if (angMir > sector*0.5f) angMir = sector - angMir;
+            float rr = sqrtf(t*t + d*d);
+            srcFx = sx + rr * cosf(angMir) * ux - rr * sinf(angMir) * perpX;
+            srcFy = sy + rr * cosf(angMir) * uy - rr * sinf(angMir) * perpY;
+            srcFx -= disp * ux * 0.5f;
+            srcFy -= disp * uy * 0.5f;
+            break;
+        }
+        case 7: { // Melt — downward drip
+            float meltPow = fmaxf(0.5f, param1);
+            float meltAmt = powf(tNorm, meltPow) * param2 * localR * effect;
+            srcFy -= meltAmt;
+            break;
+        }
+        case 8: { // Vortex — spiral swirl
+            float cx2 = (sx + ex) * 0.5f, cy2 = (sy + ey) * 0.5f;
+            float dvx = (float)px - cx2, dvy = (float)py - cy2;
+            float dist2 = sqrtf(dvx*dvx + dvy*dvy);
+            float maxR = dLen * 0.5f + localR;
+            float falloff2 = (dist2 < maxR) ? (1.f - dist2/maxR) : 0.f;
+            float angle2 = param1 * effect * falloff2 * 6.2832f;
+            float cs2 = cosf(angle2), sn2 = sinf(angle2);
+            srcFx = cx2 + dvx * cs2 - dvy * sn2;
+            srcFy = cy2 + dvx * sn2 + dvy * cs2;
+            break;
+        }
+        case 9: { // Fractal — iterative warp
+            float scale2 = fmaxf(0.1f, param1) * 0.02f;
+            int iters = max(1, min((int)(param2 * 4.f), 8));
+            float fx2 = srcFx, fy2 = srcFy;
+            for (int it = 0; it < iters; it++) {
+                fx2 += sinf(fy2 * scale2) * localR * 0.15f * effect;
+                fy2 += cosf(fx2 * scale2) * localR * 0.15f * effect;
+            }
+            srcFx = fx2; srcFy = fy2;
+            break;
+        }
+        case 10: { // Glitch — horizontal band displacement
+            float bandH = fmaxf(2.f, param1 * 10.f);
+            float band = floorf((float)py / bandH);
+            float rnd2 = phash(band * 0.1f, band * 0.3f);
+            float offset2 = (rnd2 - 0.5f) * 2.f * param2 * localR * effect;
+            srcFx += offset2;
+            break;
+        }
+        case 11: { // Dream — multi-layer warp
+            float freq1 = param1 * 0.02f, freq2 = param1 * 0.05f;
+            float amp = param2 * localR * 0.3f * effect;
+            srcFx += sinf(srcFy * freq1 + time * 0.5f) * amp;
+            srcFy += cosf(srcFx * freq2 + time * 0.7f) * amp;
+            srcFx += sinf(srcFy * freq2 * 1.5f + time * 0.3f) * amp * 0.5f;
+            srcFy += cosf(srcFx * freq1 * 1.3f + time * 0.4f) * amp * 0.5f;
+            break;
+        }
     }
 
     // Animation: Time evolve — organic turbulence per frame
@@ -200,6 +261,46 @@ __global__ void stretchKernel(
     float rgba[4];
     for (int ch = 0; ch < 4; ch++)
         rgba[ch] = bilerp(src, w, h, srcFx, srcFy, ch);
+
+    // Chromatic Aberration: offset R and B channels along stroke axis
+    if (chromaAb > 0.01f) {
+        float caOff = chromaAb * effect;
+        rgba[0] = bilerp(src, w, h, srcFx + caOff*ux, srcFy + caOff*uy, 0);
+        rgba[2] = bilerp(src, w, h, srcFx - caOff*ux, srcFy - caOff*uy, 2);
+    }
+
+    // Posterize: reduce color levels
+    if (posterize > 1.5f) {
+        float lvl = floorf(posterize);
+        for (int c=0; c<3; c++)
+            rgba[c] = floorf(rgba[c] * lvl) / lvl;
+    }
+
+    // Hue Shift: rotate hue using color matrix
+    if (fabsf(hueShift) > 0.001f) {
+        float cosA = cosf(hueShift), sinA = sinf(hueShift);
+        float s3 = 0.57735f, omc = 1.f - cosA, th = 1.f/3.f;
+        float r=rgba[0], g=rgba[1], b=rgba[2];
+        rgba[0] = r*(cosA+omc*th) + g*(omc*th-s3*sinA) + b*(omc*th+s3*sinA);
+        rgba[1] = r*(omc*th+s3*sinA) + g*(cosA+omc*th) + b*(omc*th-s3*sinA);
+        rgba[2] = r*(omc*th-s3*sinA) + g*(omc*th+s3*sinA) + b*(cosA+omc*th);
+        for (int c=0; c<3; c++) rgba[c] = fmaxf(0.f, rgba[c]);
+    }
+
+    // Solarize: invert pixels above threshold
+    if (solarize > 0.01f) {
+        float thresh = 1.f - solarize;
+        for (int c=0; c<3; c++) {
+            if (rgba[c] > thresh)
+                rgba[c] = rgba[c]*(1.f-solarize) + (1.f-rgba[c])*solarize;
+        }
+    }
+
+    // Color Invert: blend toward negative
+    if (colorInvert > 0.01f) {
+        for (int c=0; c<3; c++)
+            rgba[c] = rgba[c]*(1.f-colorInvert) + (1.f-rgba[c])*colorInvert;
+    }
 
     // Tint
     if (tintAmt > 0.001f) {
@@ -246,7 +347,8 @@ extern "C" void RunCudaStretch(
     float liqAmount, float liqScale,
     float animProgress, float animGrow, float animEvolve, float animEvolveSpeed,
     float animPulse, float animPulseFreq, float animWobble, float time,
-    float colorLock, float colorTolerance)
+    float colorLock, float colorTolerance,
+    float chromaAb, float posterize, float hueShift, float solarize, float colorInvert)
 {
     dim3 blk(16,16), grd((w+15)/16,(h+15)/16);
     stretchKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
@@ -257,5 +359,98 @@ extern "C" void RunCudaStretch(
         liqAmount, liqScale,
         animProgress, animGrow, animEvolve, animEvolveSpeed,
         animPulse, animPulseFreq, animWobble, time,
-        colorLock, colorTolerance);
+        colorLock, colorTolerance,
+        chromaAb, posterize, hueShift, solarize, colorInvert);
+}
+
+// ================================================================
+//  Global atmosphere FX kernel — full-frame pass
+// ================================================================
+__global__ void globalFXKernel(float* dst, int w, int h,
+    float vignette, float grain, float scanlines, float dreamHaze,
+    float globalHueShift, float pixelate, float mirrorGlobal, float time)
+{
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    int idx = (py * w + px) * 4;
+
+    // Pixelate
+    if (pixelate > 1.5f) {
+        int blk = (int)pixelate;
+        int bx = (px / blk) * blk + blk/2;
+        int by = (py / blk) * blk + blk/2;
+        bx = min(bx, w-1); by = min(by, h-1);
+        int bidx = (by * w + bx) * 4;
+        dst[idx+0]=dst[bidx+0]; dst[idx+1]=dst[bidx+1]; dst[idx+2]=dst[bidx+2];
+    }
+
+    // Global mirror
+    if (mirrorGlobal > 0.5f && px > w/2) {
+        int mx = w - 1 - px;
+        int midx = (py * w + mx) * 4;
+        dst[idx+0]=dst[midx+0]; dst[idx+1]=dst[midx+1]; dst[idx+2]=dst[midx+2];
+    }
+
+    float nx = (float)px / (float)w;
+    float ny = (float)py / (float)h;
+
+    // Vignette
+    if (vignette > 0.01f) {
+        float vx2 = nx - 0.5f, vy2 = ny - 0.5f;
+        float vDist = sqrtf(vx2*vx2 + vy2*vy2) * 1.414f;
+        float vFade = 1.f - vignette * vDist * vDist;
+        if (vFade < 0.f) vFade = 0.f;
+        dst[idx+0] *= vFade; dst[idx+1] *= vFade; dst[idx+2] *= vFade;
+    }
+
+    // Dream Haze
+    if (dreamHaze > 0.01f) {
+        float lum = 0.299f*dst[idx+0] + 0.587f*dst[idx+1] + 0.114f*dst[idx+2];
+        float glow = lum * lum * dreamHaze * 2.f;
+        dst[idx+0] += glow; dst[idx+1] += glow; dst[idx+2] += glow;
+    }
+
+    // Global Hue Shift
+    if (fabsf(globalHueShift) > 0.001f) {
+        float cosH = cosf(globalHueShift), sinH = sinf(globalHueShift);
+        float s3 = 0.57735f, omc = 1.f - cosH, th = 1.f/3.f;
+        float r=dst[idx+0], g=dst[idx+1], b=dst[idx+2];
+        dst[idx+0] = r*(cosH+omc*th) + g*(omc*th-s3*sinH) + b*(omc*th+s3*sinH);
+        dst[idx+1] = r*(omc*th+s3*sinH) + g*(cosH+omc*th) + b*(omc*th-s3*sinH);
+        dst[idx+2] = r*(omc*th-s3*sinH) + g*(omc*th+s3*sinH) + b*(cosH+omc*th);
+        for (int c=0; c<3; c++) dst[idx+c] = fmaxf(0.f, dst[idx+c]);
+    }
+
+    // Scanlines
+    if (scanlines > 0.01f) {
+        int lineH = max(2, (int)(4.f / (scanlines + 0.01f)));
+        if ((py % lineH) < lineH/2) {
+            float dim = 1.f - scanlines * 0.6f;
+            dst[idx+0] *= dim; dst[idx+1] *= dim; dst[idx+2] *= dim;
+        }
+    }
+
+    // Film Grain
+    if (grain > 0.01f) {
+        float rnd = phash((float)px + time * 100.f, (float)py + time * 73.f);
+        float noise = (rnd - 0.5f) * 2.f * grain * 0.15f;
+        dst[idx+0] += noise; dst[idx+1] += noise; dst[idx+2] += noise;
+    }
+}
+
+extern "C" void RunCudaGlobalFX(
+    void* stream, float* dst, int w, int h,
+    float vignette, float grain, float scanlines, float dreamHaze,
+    float globalHueShift, float pixelate, float mirrorGlobal, float time)
+{
+    bool hasAny = vignette > 0.01f || grain > 0.01f || scanlines > 0.01f
+               || dreamHaze > 0.01f || fabsf(globalHueShift) > 0.001f
+               || pixelate > 1.5f || mirrorGlobal > 0.5f;
+    if (!hasAny) return;
+    dim3 blk(16,16), grd((w+15)/16,(h+15)/16);
+    globalFXKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+        dst, w, h, vignette, grain, scanlines, dreamHaze,
+        globalHueShift, pixelate, mirrorGlobal, time);
 }

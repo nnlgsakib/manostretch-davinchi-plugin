@@ -55,10 +55,16 @@ extern "C" void RunCudaStretch(void* stream, const float* src, float* dst,
     float liqAmount, float liqScale,
     float animProgress, float animGrow, float animEvolve, float animEvolveSpeed,
     float animPulse, float animPulseFreq, float animWobble, float time,
-    float colorLock, float colorTolerance);
+    float colorLock, float colorTolerance,
+    float chromaAb, float posterize, float hueShift, float solarize, float colorInvert);
+extern "C" void RunCudaGlobalFX(void* stream, float* dst,
+    int w, int h,
+    float vignette, float grain, float scanlines, float dreamHaze,
+    float globalHueShift, float pixelate, float mirrorGlobal, float time);
 #endif
 
-enum StretchMode { eLinear=0, eSpiral=1, eWave=2, eTaper=3, eSmear=4, eShatter=5 };
+enum StretchMode { eLinear=0, eSpiral=1, eWave=2, eTaper=3, eSmear=4, eShatter=5,
+                   eMirror=6, eMelt=7, eVortex=8, eFractal=9, eGlitch=10, eDream=11 };
 
 // ================================================================
 //  Stroke — per-drag gesture, captures brush params at creation
@@ -154,6 +160,20 @@ struct PostFX {
     float animPulse, animPulseFreq;
     float animWobble;
     float colorLock, colorTolerance;
+    // Surreal per-stroke FX
+    float chromaAb;       // chromatic aberration offset
+    float posterize;      // color level reduction (0=off)
+    float hueShift;       // hue rotation in radians
+    float solarize;       // solarization amount
+    float colorInvert;    // color inversion amount
+    // Global atmosphere FX
+    float vignette;       // edge darkening
+    float grain;          // film grain amount
+    float scanlines;      // retro scanline intensity
+    float dreamHaze;      // luminance-based glow
+    float globalHueShift; // animated hue cycle
+    float pixelate;       // pixelation block size (0=off)
+    float mirrorGlobal;   // global mirror axis (0=off)
 };
 
 // DISPLACEMENT-BASED STRETCH — matches CUDA kernel.
@@ -296,6 +316,67 @@ static void cpuStretch(
             srcFy += sc2*perpY*effect;
             break;
           }
+          case eMirror: {
+            float mirD = (d < 0.f) ? -d : d;
+            float segs = (std::max)(1.f, std::floor(p1));
+            float angOrig = std::atan2(d, (std::max)(0.001f, t));
+            float sector = (float)(2.0*M_PI) / segs;
+            float angMir = std::fmod(std::abs(angOrig), sector);
+            if (angMir > sector*0.5f) angMir = sector - angMir;
+            float rr = std::sqrt(t*t + d*d);
+            srcFx = sx + rr * std::cos(angMir) * ux - rr * std::sin(angMir) * perpX;
+            srcFy = sy + rr * std::cos(angMir) * uy - rr * std::sin(angMir) * perpY;
+            srcFx -= disp * ux * 0.5f;
+            srcFy -= disp * uy * 0.5f;
+            break;
+          }
+          case eMelt: {
+            float meltPow = (std::max)(0.5f, p1);
+            float meltAmt = std::pow(tN, meltPow) * p2 * localR * effect;
+            srcFy -= meltAmt;
+            break;
+          }
+          case eVortex: {
+            float cx2 = (sx + ex) * 0.5f, cy2 = (sy + ey) * 0.5f;
+            float dvx = (float)px - cx2, dvy = (float)py - cy2;
+            float dist2 = std::sqrt(dvx*dvx + dvy*dvy);
+            float maxR = dLen * 0.5f + localR;
+            float falloff2 = (dist2 < maxR) ? (1.f - dist2/maxR) : 0.f;
+            float angle2 = p1 * effect * falloff2 * (float)(2.0*M_PI);
+            float cs2 = std::cos(angle2), sn2 = std::sin(angle2);
+            srcFx = cx2 + dvx * cs2 - dvy * sn2;
+            srcFy = cy2 + dvx * sn2 + dvy * cs2;
+            break;
+          }
+          case eFractal: {
+            float scale2 = (std::max)(0.1f, p1) * 0.02f;
+            int iters = (std::max)(1, (std::min)((int)(p2 * 4.f), 8));
+            float fx2 = srcFx, fy2 = srcFy;
+            for (int it = 0; it < iters; it++) {
+                fx2 += std::sin(fy2 * scale2) * localR * 0.15f * effect;
+                fy2 += std::cos(fx2 * scale2) * localR * 0.15f * effect;
+            }
+            srcFx = fx2; srcFy = fy2;
+            break;
+          }
+          case eGlitch: {
+            float bandH = (std::max)(2.f, p1 * 10.f);
+            float band = std::floor((float)py / bandH);
+            float rnd2 = cpuHash(band * 0.1f, band * 0.3f);
+            float offset2 = (rnd2 - 0.5f) * 2.f * p2 * localR * effect;
+            srcFx += offset2;
+            break;
+          }
+          case eDream: {
+            float freq1 = p1 * 0.02f, freq2 = p1 * 0.05f;
+            float amp = p2 * localR * 0.3f * effect;
+            float tm = fx.time;
+            srcFx += std::sin(srcFy * freq1 + tm * 0.5f) * amp;
+            srcFy += std::cos(srcFx * freq2 + tm * 0.7f) * amp;
+            srcFx += std::sin(srcFy * freq2 * 1.5f + tm * 0.3f) * amp * 0.5f;
+            srcFy += std::cos(srcFx * freq1 * 1.3f + tm * 0.4f) * amp * 0.5f;
+            break;
+          }
         }
 
         // Animation: Time evolve — organic turbulence per frame
@@ -323,6 +404,46 @@ static void cpuStretch(
         float rgba[4];
         for (int c=0; c<4; c++)
             rgba[c] = bilerpCPU(srcBase, sB, sRB, srcFx, srcFy, c);
+
+        // Chromatic Aberration: offset R and B channels along stroke axis
+        if (fx.chromaAb > 0.01f) {
+            float caOff = fx.chromaAb * effect;
+            rgba[0] = bilerpCPU(srcBase, sB, sRB, srcFx + caOff*ux, srcFy + caOff*uy, 0);
+            rgba[2] = bilerpCPU(srcBase, sB, sRB, srcFx - caOff*ux, srcFy - caOff*uy, 2);
+        }
+
+        // Posterize: reduce color levels
+        if (fx.posterize > 1.5f) {
+            float lvl = std::floor(fx.posterize);
+            for (int c=0; c<3; c++)
+                rgba[c] = std::floor(rgba[c] * lvl) / lvl;
+        }
+
+        // Hue Shift: rotate hue using color matrix
+        if (std::abs(fx.hueShift) > 0.001f) {
+            float cosA = std::cos(fx.hueShift), sinA = std::sin(fx.hueShift);
+            float s3 = 0.57735f, omc = 1.f - cosA, th = 1.f/3.f;
+            float r=rgba[0], g=rgba[1], b=rgba[2];
+            rgba[0] = r*(cosA+omc*th) + g*(omc*th-s3*sinA) + b*(omc*th+s3*sinA);
+            rgba[1] = r*(omc*th+s3*sinA) + g*(cosA+omc*th) + b*(omc*th-s3*sinA);
+            rgba[2] = r*(omc*th-s3*sinA) + g*(omc*th+s3*sinA) + b*(cosA+omc*th);
+            for (int c=0; c<3; c++) rgba[c] = (std::max)(0.f, rgba[c]);
+        }
+
+        // Solarize: invert pixels above threshold
+        if (fx.solarize > 0.01f) {
+            float thresh = 1.f - fx.solarize;
+            for (int c=0; c<3; c++) {
+                if (rgba[c] > thresh)
+                    rgba[c] = rgba[c]*(1.f-fx.solarize) + (1.f-rgba[c])*fx.solarize;
+            }
+        }
+
+        // Color Invert: blend toward negative
+        if (fx.colorInvert > 0.01f) {
+            for (int c=0; c<3; c++)
+                rgba[c] = rgba[c]*(1.f-fx.colorInvert) + (1.f-rgba[c])*fx.colorInvert;
+        }
 
         if (tAmt > 0.001f) {
             rgba[0]=rgba[0]*(1.f-tAmt)+rgba[0]*tR*tAmt;
@@ -354,6 +475,87 @@ static void cpuStretch(
 }
 
 // ================================================================
+//  Global atmosphere FX — full-frame pass after all strokes
+// ================================================================
+static void cpuGlobalFX(void* dstBase, const OfxRectI& dB, int dRB,
+                         int w, int h, const PostFX& fx)
+{
+    bool hasAny = fx.vignette > 0.01f || fx.grain > 0.01f || fx.scanlines > 0.01f
+               || fx.dreamHaze > 0.01f || std::abs(fx.globalHueShift) > 0.001f
+               || fx.pixelate > 1.5f || fx.mirrorGlobal > 0.5f;
+    if (!hasAny) return;
+
+    float cosH=0,sinH=0,s3H=0,omcH=0,thH=0;
+    if (std::abs(fx.globalHueShift) > 0.001f) {
+        cosH = std::cos(fx.globalHueShift); sinH = std::sin(fx.globalHueShift);
+        s3H = 0.57735f; omcH = 1.f - cosH; thH = 1.f/3.f;
+    }
+
+    for (int py=dB.y1; py<dB.y2; py++) {
+      for (int px=dB.x1; px<dB.x2; px++) {
+        float* dp = pxAt(dstBase, dB, dRB, px, py);
+        if (!dp) continue;
+
+        if (fx.pixelate > 1.5f) {
+            int blk = (int)fx.pixelate;
+            int bx = (px / blk) * blk + blk/2;
+            int by = (py / blk) * blk + blk/2;
+            float* bp = pxAt(dstBase, dB, dRB,
+                (std::min)(bx, dB.x2-1), (std::min)(by, dB.y2-1));
+            if (bp) { dp[0]=bp[0]; dp[1]=bp[1]; dp[2]=bp[2]; }
+        }
+
+        if (fx.mirrorGlobal > 0.5f) {
+            int mx = dB.x1 + (dB.x2 - 1 - px);
+            float* mp = pxAt(dstBase, dB, dRB, mx, py);
+            if (mp && px > (dB.x1 + dB.x2)/2) {
+                dp[0]=mp[0]; dp[1]=mp[1]; dp[2]=mp[2];
+            }
+        }
+
+        float nx = (float)(px - dB.x1) / (float)w;
+        float ny = (float)(py - dB.y1) / (float)h;
+
+        if (fx.vignette > 0.01f) {
+            float vx2 = nx - 0.5f, vy2 = ny - 0.5f;
+            float vDist = std::sqrt(vx2*vx2 + vy2*vy2) * 1.414f;
+            float vFade = 1.f - fx.vignette * vDist * vDist;
+            if (vFade < 0.f) vFade = 0.f;
+            dp[0] *= vFade; dp[1] *= vFade; dp[2] *= vFade;
+        }
+
+        if (fx.dreamHaze > 0.01f) {
+            float lum = 0.299f*dp[0] + 0.587f*dp[1] + 0.114f*dp[2];
+            float glow = lum * lum * fx.dreamHaze * 2.f;
+            dp[0] += glow; dp[1] += glow; dp[2] += glow;
+        }
+
+        if (std::abs(fx.globalHueShift) > 0.001f) {
+            float r=dp[0], g=dp[1], b=dp[2];
+            dp[0] = r*(cosH+omcH*thH) + g*(omcH*thH-s3H*sinH) + b*(omcH*thH+s3H*sinH);
+            dp[1] = r*(omcH*thH+s3H*sinH) + g*(cosH+omcH*thH) + b*(omcH*thH-s3H*sinH);
+            dp[2] = r*(omcH*thH-s3H*sinH) + g*(omcH*thH+s3H*sinH) + b*(cosH+omcH*thH);
+            for (int c=0; c<3; c++) dp[c] = (std::max)(0.f, dp[c]);
+        }
+
+        if (fx.scanlines > 0.01f) {
+            int lineH = (std::max)(2, (int)(4.f / (fx.scanlines + 0.01f)));
+            if ((py % lineH) < lineH/2) {
+                float dim = 1.f - fx.scanlines * 0.6f;
+                dp[0] *= dim; dp[1] *= dim; dp[2] *= dim;
+            }
+        }
+
+        if (fx.grain > 0.01f) {
+            float rnd = cpuHash((float)px + fx.time * 100.f, (float)py + fx.time * 73.f);
+            float noise = (rnd - 0.5f) * 2.f * fx.grain * 0.15f;
+            dp[0] += noise; dp[1] += noise; dp[2] += noise;
+        }
+      }
+    }
+}
+
+// ================================================================
 //  Plugin
 // ================================================================
 class ManoStretchPlugin : public ImageEffect {
@@ -379,6 +581,18 @@ public:
         m_AnimWobble     = fetchDoubleParam("animWobble");
         m_ColorLock      = fetchDoubleParam("colorLock");
         m_ColorTolerance = fetchDoubleParam("colorTolerance");
+        m_ChromaAb       = fetchDoubleParam("chromaAb");
+        m_Posterize      = fetchDoubleParam("posterize");
+        m_HueShift       = fetchDoubleParam("hueShift");
+        m_Solarize       = fetchDoubleParam("solarize");
+        m_ColorInvert    = fetchDoubleParam("colorInvert");
+        m_Vignette       = fetchDoubleParam("vignette");
+        m_Grain          = fetchDoubleParam("grain");
+        m_Scanlines      = fetchDoubleParam("scanlines");
+        m_DreamHaze      = fetchDoubleParam("dreamHaze");
+        m_GlobalHueShift = fetchDoubleParam("globalHueShift");
+        m_Pixelate       = fetchDoubleParam("pixelate");
+        m_MirrorGlobal   = fetchDoubleParam("mirrorGlobal");
     }
 
     virtual void render(const RenderArguments& a) {
@@ -419,6 +633,18 @@ public:
         m_AnimWobble->getValueAtTime(a.time, v);       fx.animWobble      = (float)v;
         m_ColorLock->getValue(v);       fx.colorLock      = (float)(v / 100.0);
         m_ColorTolerance->getValue(v);  fx.colorTolerance = (float)(v / 100.0);
+        m_ChromaAb->getValueAtTime(a.time, v);       fx.chromaAb       = (float)v;
+        m_Posterize->getValueAtTime(a.time, v);      fx.posterize      = (float)v;
+        m_HueShift->getValueAtTime(a.time, v);       fx.hueShift       = (float)(v * M_PI / 180.0);
+        m_Solarize->getValueAtTime(a.time, v);       fx.solarize       = (float)(v / 100.0);
+        m_ColorInvert->getValueAtTime(a.time, v);    fx.colorInvert    = (float)(v / 100.0);
+        m_Vignette->getValueAtTime(a.time, v);       fx.vignette       = (float)(v / 100.0);
+        m_Grain->getValueAtTime(a.time, v);          fx.grain          = (float)(v / 100.0);
+        m_Scanlines->getValueAtTime(a.time, v);      fx.scanlines      = (float)(v / 100.0);
+        m_DreamHaze->getValueAtTime(a.time, v);      fx.dreamHaze      = (float)(v / 100.0);
+        m_GlobalHueShift->getValueAtTime(a.time, v); fx.globalHueShift = (float)(v * M_PI / 180.0);
+        m_Pixelate->getValueAtTime(a.time, v);       fx.pixelate       = (float)v;
+        m_MirrorGlobal->getValueAtTime(a.time, v);   fx.mirrorGlobal   = (float)v;
 
         double rsx=a.renderScale.x, rsy=a.renderScale.y;
         int maxD = (std::max)(w, h);
@@ -441,8 +667,12 @@ public:
                     fx.liqAmount, fx.liqScale,
                     fx.animProgress, fx.animGrow, fx.animEvolve, fx.animEvolveSpeed,
                     fx.animPulse, fx.animPulseFreq, fx.animWobble, fx.time,
-                    fx.colorLock, fx.colorTolerance);
+                    fx.colorLock, fx.colorTolerance,
+                    fx.chromaAb, fx.posterize, fx.hueShift, fx.solarize, fx.colorInvert);
             }
+            RunCudaGlobalFX(a.pCudaStream, dD, w, h,
+                fx.vignette, fx.grain, fx.scanlines, fx.dreamHaze,
+                fx.globalHueShift, fx.pixelate, fx.mirrorGlobal, fx.time);
             return;
         }
 #endif
@@ -463,6 +693,8 @@ public:
             ls.endX*=rsx;   ls.endY*=rsy;
             cpuStretch(sBase, sB, sRB, dBase, dB, dRB, ls, maxD, fx);
         }
+
+        cpuGlobalFX(dBase, dB, dRB, w, h, fx);
     }
 
     virtual bool isIdentity(const IsIdentityArguments& a,
@@ -482,6 +714,9 @@ private:
     DoubleParam *m_AnimProgress, *m_AnimGrow, *m_AnimEvolve, *m_AnimEvolveSpeed;
     DoubleParam *m_AnimPulse, *m_AnimPulseFreq, *m_AnimWobble;
     DoubleParam *m_ColorLock, *m_ColorTolerance;
+    DoubleParam *m_ChromaAb, *m_Posterize, *m_HueShift, *m_Solarize, *m_ColorInvert;
+    DoubleParam *m_Vignette, *m_Grain, *m_Scanlines, *m_DreamHaze;
+    DoubleParam *m_GlobalHueShift, *m_Pixelate, *m_MirrorGlobal;
 };
 
 //  Overlay Interact
@@ -708,6 +943,16 @@ public:
             _effect->endEditBlock();
             requestRedraw(); return true;
         }
+        if (args.keyString=="z"||args.keyString=="Z") {
+            if (!m_strokes.empty()) {
+                m_strokes.pop_back();
+                _effect->beginEditBlock("msUndo");
+                _effect->fetchStringParam("_strokeData")->setValue(serializeStrokes(m_strokes));
+                _effect->endEditBlock();
+                requestRedraw();
+            }
+            return true;
+        }
         if (args.keyString=="[") {
             double r; _effect->fetchDoubleParam("radius")->getValue(r);
             _effect->fetchDoubleParam("radius")->setValue((std::max)(0.5, r-1.0));
@@ -794,6 +1039,12 @@ public:
           p->appendOption("Taper",   "Narrows toward the end");
           p->appendOption("Smear",   "Motion-blur-like smear");
           p->appendOption("Shatter", "Shattered/glitchy scatter");
+          p->appendOption("Mirror",  "Kaleidoscopic mirror reflections");
+          p->appendOption("Melt",    "Downward melting/dripping");
+          p->appendOption("Vortex",  "Spiral vortex around center");
+          p->appendOption("Fractal", "Iterative fractal distortion");
+          p->appendOption("Glitch",  "Horizontal band displacement");
+          p->appendOption("Dream",   "Multi-layer dreamy warp");
           p->setDefault(0); p->setAnimates(true); p->setParent(*g);
           pg->addChild(*p);
         }
@@ -859,12 +1110,12 @@ public:
           p = d.defineDoubleParam("param1");
           p->setLabels("Detail 1","Detail 1","Detail 1");
           p->setDefault(2); p->setRange(0,20); p->setDisplayRange(0,10);
-          p->setHint("Spiral: turns | Wave: freq | Smear: amount | Shatter: scatter");
+          p->setHint("Spiral:turns | Wave:freq | Smear:pow | Shatter:scatter | Mirror:segs | Melt:pow | Vortex:turns | Fractal:scale | Glitch:bandH | Dream:freq");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
           p = d.defineDoubleParam("param2");
           p->setLabels("Detail 2","Detail 2","Detail 2");
           p->setDefault(0.5); p->setRange(0,5); p->setDisplayRange(0,2);
-          p->setHint("Wave: amplitude"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p->setHint("Wave:amp | Melt:amt | Fractal:iters | Glitch:amt | Dream:amp"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
         // ========== POST FX (editable after stretching) ==========
@@ -958,6 +1209,82 @@ public:
           p->setLabels("Wobble","Wobble","Wobble");
           p->setDefault(0); p->setRange(0,50); p->setDisplayRange(0,30);
           p->setHint("Time-varying perpendicular wobble — creates waving/jelly effect");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ========== SURREAL PER-STROKE FX ==========
+        { GroupParamDescriptor* g = d.defineGroupParam("grpSurrealFX");
+          g->setLabels("Surreal FX","Surreal FX","Surreal FX");
+          g->setOpen(false); pg->addChild(*g);
+
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("chromaAb");
+          p->setLabels("Chromatic Aberration","Chromatic Aberration","Chromatic Aberration");
+          p->setDefault(0); p->setRange(0,50); p->setDisplayRange(0,20);
+          p->setHint("RGB channel split along stroke direction");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("posterize");
+          p->setLabels("Posterize","Posterize","Posterize");
+          p->setDefault(0); p->setRange(0,32); p->setDisplayRange(0,16);
+          p->setHint("Reduce color levels for poster/pop-art look (0=off, 4=strong)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("hueShift");
+          p->setLabels("Hue Shift","Hue Shift","Hue Shift");
+          p->setDefault(0); p->setRange(-180,180); p->setDisplayRange(-180,180);
+          p->setHint("Rotate hue of stretched pixels (degrees)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("solarize");
+          p->setLabels("Solarize","Solarize","Solarize");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
+          p->setHint("Invert bright pixels for surreal solarization");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("colorInvert");
+          p->setLabels("Color Invert","Color Invert","Color Invert");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
+          p->setHint("Blend toward color negative (0=normal, 100=fully inverted)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ========== GLOBAL ATMOSPHERE ==========
+        { GroupParamDescriptor* g = d.defineGroupParam("grpAtmosphere");
+          g->setLabels("Atmosphere","Atmosphere","Atmosphere");
+          g->setOpen(false); pg->addChild(*g);
+
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("vignette");
+          p->setLabels("Vignette","Vignette","Vignette");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
+          p->setHint("Darken image edges for moody atmosphere");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("grain");
+          p->setLabels("Film Grain","Film Grain","Film Grain");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Add noise for analog/VHS feel");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("scanlines");
+          p->setLabels("Scanlines","Scanlines","Scanlines");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,100);
+          p->setHint("Horizontal retro scanline overlay");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("dreamHaze");
+          p->setLabels("Dream Haze","Dream Haze","Dream Haze");
+          p->setDefault(0); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Luminance-based glow for dreamy atmosphere");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("globalHueShift");
+          p->setLabels("Global Hue Shift","Global Hue Shift","Global Hue Shift");
+          p->setDefault(0); p->setRange(-180,180); p->setDisplayRange(-180,180);
+          p->setHint("Rotate entire image hue — keyframe for psychedelic cycling");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("pixelate");
+          p->setLabels("Pixelate","Pixelate","Pixelate");
+          p->setDefault(0); p->setRange(0,64); p->setDisplayRange(0,32);
+          p->setHint("Block size for retro pixelation (0=off)");
+          p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("mirrorGlobal");
+          p->setLabels("Global Mirror","Global Mirror","Global Mirror");
+          p->setDefault(0); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("Mirror the image horizontally (0=off, 1=on)");
           p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
         }
 
