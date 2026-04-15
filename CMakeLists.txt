@@ -42,23 +42,35 @@ else()
     set(RESOLVE_SDK_DIR "/opt/resolve/Developer/OpenFX")
 endif()
 
-# Add BOTH OFX include directories
-set(OFX_CORE_INCLUDE "${RESOLVE_SDK_DIR}/OpenFX-1.4/include")
-set(OFX_SUPPORT_INCLUDE "${RESOLVE_SDK_DIR}/Support/include")
-set(OFX_SUPPORT_LIB "${RESOLVE_SDK_DIR}/Support/Library")
+# OFX_SDK_ROOT: pass this on CI or when Resolve is not installed.
+# It should point to a clone of https://github.com/AcademySoftwareFoundation/openfx
+set(OFX_SDK_ROOT "" CACHE PATH "Path to OpenFX SDK root (overrides Resolve SDK)")
+
+if(OFX_SDK_ROOT AND EXISTS "${OFX_SDK_ROOT}")
+    # Use standalone OpenFX SDK (CI / non-Resolve builds)
+    set(OFX_CORE_INCLUDE "${OFX_SDK_ROOT}/include")
+    set(OFX_SUPPORT_INCLUDE "${OFX_SDK_ROOT}/Support/include")
+    set(OFX_SUPPORT_LIB "${OFX_SDK_ROOT}/Support/Library")
+    message(STATUS "Using OpenFX SDK from OFX_SDK_ROOT: ${OFX_SDK_ROOT}")
+else()
+    # Use Resolve-bundled SDK (local dev)
+    set(OFX_CORE_INCLUDE "${RESOLVE_SDK_DIR}/OpenFX-1.4/include")
+    set(OFX_SUPPORT_INCLUDE "${RESOLVE_SDK_DIR}/Support/include")
+    set(OFX_SUPPORT_LIB "${RESOLVE_SDK_DIR}/Support/Library")
+endif()
 
 if(EXISTS "${OFX_CORE_INCLUDE}")
     include_directories("${OFX_CORE_INCLUDE}")
-    message(STATUS "Using OFX core headers from: ${OFX_CORE_INCLUDE}")
+    message(STATUS "OFX core headers: ${OFX_CORE_INCLUDE}")
 else()
-    message(WARNING "OFX core headers not found")
+    message(WARNING "OFX core headers not found at ${OFX_CORE_INCLUDE}")
 endif()
 
 if(EXISTS "${OFX_SUPPORT_INCLUDE}")
     include_directories("${OFX_SUPPORT_INCLUDE}")
-    message(STATUS "Using OFX support headers from: ${OFX_SUPPORT_INCLUDE}")
+    message(STATUS "OFX support headers: ${OFX_SUPPORT_INCLUDE}")
 else()
-    message(WARNING "OFX support headers not found")
+    message(WARNING "OFX support headers not found at ${OFX_SUPPORT_INCLUDE}")
 endif()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)

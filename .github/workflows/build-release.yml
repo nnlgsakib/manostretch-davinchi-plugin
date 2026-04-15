@@ -52,11 +52,15 @@ jobs:
           echo "CUDA_PATH=$cudaPath" >> $env:GITHUB_ENV
           echo "$cudaPath\bin" >> $env:GITHUB_PATH
 
+      - name: Clone OpenFX SDK
+        run: git clone --depth 1 https://github.com/AcademySoftwareFoundation/openfx.git C:\openfx
+
       - name: Configure CMake
         shell: pwsh
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release `
-            -DNVCC_EXECUTABLE="C:/cuda/bin/nvcc.exe"
+            -DNVCC_EXECUTABLE="C:/cuda/bin/nvcc.exe" `
+            -DOFX_SDK_ROOT="C:/openfx"
 
       - name: Build
         run: cmake --build build --config Release
