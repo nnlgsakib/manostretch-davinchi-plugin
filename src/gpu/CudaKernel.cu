@@ -663,3 +663,682 @@ extern "C" void RunCudaSurrealismPass(
 
     cudaFree(tmp);
 }
+
+// ================================================================
+//  NEW DISTORTION EFFECTS - CUDA KERNELS
+// ================================================================
+
+// 1. Fluid Morph - Metaball-style organic blob merging
+__global__ void fluidMorphKernel(const float* src, float* dst, int w, int h,
+    float fluidBlobCount, float fluidThreshold, float fluidJitter, float fluidSpeed, float time) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    int blobCount = (int)fminf(fmaxf(fluidBlobCount, 3.0f), 10.0f);
+
+    // Generate blob positions on GPU (deterministic based on frame)
+    float cx = w * 0.5f, cy = h * 0.5f;
+    float maxR = fminf((float)w, (float)h);
+    float field = 0;
+
+    for (int i = 0; i < blobCount; i++) {
+        float seed = (float)(i + 1) * 1000.0f + fluidSpeed * 100.0f;
+        float bx = phash(seed, time * 0.1f) * (float)w;
+        float by = phash(seed + 1.0f, time * 0.1f) * (float)h;
+        float ang = phash(seed + 2.0f, time * 0.05f) * 6.28318f;
+        float speed = 20.0f + phash(seed + 3.0f, time * 0.03f) * 30.0f;
+        bx += cosf(ang) * speed * time * fluidSpeed;
+        by += sinf(ang) * speed * time * fluidSpeed;
+        bx = fmodf(bx + w * 2, (float)w);
+        by = fmodf(by + h * 2, (float)h);
+
+        float dx2 = (float)px - bx;
+        float dy2 = (float)py - by;
+        float dist = sqrtf(dx2 * dx2 + dy2 * dy2);
+        float radius = maxR * 0.15f;
+        field += radius * radius / (dist * dist + 1.0f);
+    }
+
+    int idx = (py * w + px) * 4;
+    if (field > fluidThreshold) {
+        // Find closest blob center for warp
+        float minDist = 1e10f, closestX = 0, closestY = 0;
+        for (int i = 0; i < blobCount; i++) {
+            float seed = (float)(i + 1) * 1000.0f + fluidSpeed * 100.0f;
+            float bx = phash(seed, time * 0.1f) * (float)w;
+            float by = phash(seed + 1.0f, time * 0.1f) * (float)h;
+            float ang = phash(seed + 2.0f, time * 0.05f) * 6.28318f;
+            float speed = 20.0f + phash(seed + 3.0f, time * 0.03f) * 30.0f;
+            bx += cosf(ang) * speed * time * fluidSpeed;
+            by += sinf(ang) * speed * time * fluidSpeed;
+            bx = fmodf(bx + w * 2, (float)w);
+            by = fmodf(by + h * 2, (float)h);
+            float d = (px - bx) * (px - bx) + (py - by) * (py - by);
+            if (d < minDist) { minDist = d; closestX = bx; closestY = by; }
+        }
+        float warp = fluidJitter * 0.3f;
+        float srcX = (float)px + (closestX - (float)px) * warp;
+        float srcY = (float)py + (closestY - (float)py) * warp;
+        for (int c = 0; c < 4; c++)
+            dst[idx + c] = bilerp(src, w, h, srcX, srcY, c);
+    } else {
+        dst[idx + 0] = src[idx + 0];
+        dst[idx + 1] = src[idx + 1];
+        dst[idx + 2] = src[idx + 2];
+        dst[idx + 3] = src[idx + 3];
+    }
+}
+
+// 2. Mirror Fractal - Recursive kaleidoscope
+__global__ void mirrorFractalKernel(const float* src, float* dst, int w, int h,
+    float mirrorDepth, float mirrorRotateEach, float mirrorScale) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    int depth = (int)fminf(fmaxf(mirrorDepth, 2.0f), 8.0f);
+    float cx = w * 0.5f, cy = h * 0.5f;
+
+    float srcX = (float)px, srcY = (float)py;
+
+    for (int level = 0; level < depth; level++) {
+        float dx2 = srcX - cx;
+        float dy2 = srcY - cy;
+        float angle = atan2f(dy2, dx2);
+        float rotPerLevel = mirrorRotateEach * 6.28318f * (float)level / (float)depth;
+        angle += rotPerLevel;
+        float radius = sqrtf(dx2 * dx2 + dy2 * dy2);
+        radius *= mirrorScale;
+        int segs = 2 + level;
+        float sector = 6.28318f / (float)segs;
+        float angMod = fmodf(fabsf(angle), sector);
+        if (angMod > sector * 0.5f) angMod = sector - angMod;
+        srcX = cx + radius * cosf(angMod);
+        srcY = cy + radius * sinf(angMod);
+    }
+
+    int idx = (py * w + px) * 4;
+    for (int c = 0; c < 4; c++)
+        dst[idx + c] = bilerp(src, w, h, srcX, srcY, c);
+}
+
+// 3. Glitch Slice - Horizontal band displacement
+__global__ void glitchSliceKernel(const float* src, float* dst, int w, int h,
+    float sliceCount, float sliceDisplaceAmt, float sliceRandSeed, float sliceRGBSplit, float time) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    int nSlices = (int)fminf(fmaxf(sliceCount, 4.0f), 32.0f);
+    float bandHeight = (float)h / (float)nSlices;
+    int band = (int)((float)py / bandHeight);
+    float rnd = phash((float)band + sliceRandSeed, time * 0.1f);
+    float offset = (rnd - 0.5f) * 2.0f * sliceDisplaceAmt;
+    offset *= (0.5f + 0.5f * sinf(time * 0.5f + band * 0.5f));
+
+    int idx = (py * w + px) * 4;
+    float srcX = (float)px + offset;
+    dst[idx + 0] = bilerp(src, w, h, srcX + sliceRGBSplit, (float)py, 0);
+    dst[idx + 1] = bilerp(src, w, h, srcX, (float)py, 1);
+    dst[idx + 2] = bilerp(src, w, h, srcX - sliceRGBSplit, (float)py, 2);
+    dst[idx + 3] = bilerp(src, w, h, srcX, (float)py, 3);
+}
+
+// 4. Triangulate - Delaunay mosaic (simplified GPU version)
+__global__ void triangulateKernel(const float* src, float* dst, int w, int h,
+    float triPointCount, float triEdgeThickness, float triEdgeColorR, float triEdgeColorG, float triEdgeColorB,
+    float triFillVariant, float mirrorSeed) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    int pointCount = (int)fminf(fmaxf(triPointCount, 50.0f), 2000.0f);
+
+    // Find 3 closest points (simplified - uses pseudo-random sampling)
+    float best1 = 1e10f, best2 = 1e10f, best3 = 1e10f;
+    float cx1 = 0, cy1 = 0, cx2 = 0, cy2 = 0, cx3 = 0, cy3 = 0;
+
+    // Sample a subset of points for performance
+    for (int i = 0; i < fminf(pointCount, 200); i++) {
+        float seed = (float)i + mirrorSeed;
+        float sx = phash(seed, 111.0f) * (float)w;
+        float sy = phash(seed, 222.0f) * (float)h;
+        float d = (px - sx) * (px - sx) + (py - sy) * (py - sy);
+        if (d < best1) { best3 = best2; cx3 = cx2; cy3 = cy2; best2 = best1; cx2 = cx1; cy2 = cy1; best1 = d; cx1 = sx; cy1 = sy; }
+        else if (d < best2) { best3 = best2; cx3 = cx2; cy2 = cy2; best2 = d; cx2 = sx; cy2 = sy; }
+        else if (d < best3) { best3 = d; cx3 = sx; cy3 = sy; }
+    }
+
+    float tcx = (cx1 + cx2 + cx3) / 3.0f;
+    float tcy = (cy1 + cy2 + cy3) / 3.0f;
+    float variant = triFillVariant * phash((float)px * 0.01f, (float)py * 0.01f);
+
+    int idx = (py * w + px) * 4;
+    for (int c = 0; c < 4; c++) {
+        float col = bilerp(src, w, h, tcx, tcy, c);
+        col += (variant - triFillVariant * 0.5f);
+        dst[idx + c] = col;
+    }
+
+    // Edge detection
+    if (triEdgeThickness > 0.01f) {
+        float minD = sqrtf(best1);
+        float edgeWidth = triEdgeThickness * 10.0f;
+        if (minD < edgeWidth) {
+            float edgeFactor = minD / edgeWidth;
+            dst[idx + 0] = dst[idx + 0] * edgeFactor + triEdgeColorR * (1.0f - edgeFactor);
+            dst[idx + 1] = dst[idx + 1] * edgeFactor + triEdgeColorG * (1.0f - edgeFactor);
+            dst[idx + 2] = dst[idx + 2] * edgeFactor + triEdgeColorB * (1.0f - edgeFactor);
+        }
+    }
+}
+
+// 5. Water Ripple - Concentric ripples
+__global__ void waterRippleKernel(const float* src, float* dst, int w, int h,
+    float rippleCenterX, float rippleCenterY, float rippleFrequency, float rippleAmplitude,
+    float rippleDecay, float rippleSpeed, float ripplePhase) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    float cx = rippleCenterX * (float)w;
+    float cy = rippleCenterY * (float)h;
+    float dx2 = (float)px - cx;
+    float dy = (float)py - cy;
+    float dist = sqrtf(dx2 * dx2 + dy * dy);
+
+    float wave = sinf(dist * rippleFrequency * 0.01f - rippleSpeed * 10.0f + ripplePhase);
+    float falloff = expf(-dist * rippleDecay * 0.01f);
+    float offset = wave * rippleAmplitude * falloff;
+
+    int idx = (py * w + px) * 4;
+    if (dist > 1.0f) {
+        float srcX = (float)px + (dx2 / dist) * offset;
+        float srcY = (float)py + (dy / dist) * offset;
+        for (int c = 0; c < 4; c++)
+            dst[idx + c] = bilerp(src, w, h, srcX, srcY, c);
+    } else {
+        dst[idx + 0] = src[idx + 0];
+        dst[idx + 1] = src[idx + 1];
+        dst[idx + 2] = src[idx + 2];
+        dst[idx + 3] = src[idx + 3];
+    }
+}
+
+// 6. Displacement Map
+__global__ void displacementMapKernel(const float* src, float* dst, int w, int h,
+    float dispStrength, float dispScale, float dispChannel, float dispDirection) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    int idx = (py * w + px) * 4;
+    float dispVal;
+    int ch = (int)dispChannel;
+    if (ch == 3) // Luminance
+        dispVal = 0.299f * src[idx] + 0.587f * src[idx + 1] + 0.114f * src[idx + 2];
+    else
+        dispVal = src[idx + ch];
+
+    dispVal = dispVal - 0.5f;
+    float offsetX = 0, offsetY = 0;
+    int dir = (int)dispDirection;
+
+    if (dir == 0 || dir == 1)
+        offsetX = dispVal * dispStrength * cosf(px * dispScale + py * dispScale * 0.5f);
+    if (dir == 0 || dir == 2)
+        offsetY = dispVal * dispStrength * sinf(py * dispScale + px * dispScale * 0.5f);
+
+    float srcX = (float)px + offsetX;
+    float srcY = (float)py + offsetY;
+
+    for (int c = 0; c < 4; c++)
+        dst[idx + c] = bilerp(src, w, h, srcX, srcY, c);
+}
+
+// 7. Tile/Repeat
+__global__ void tileRepeatKernel(const float* src, float* dst, int w, int h,
+    float tileRows, float tileCols, float tileOffsetX, float tileOffsetY, float tileRandomSeed) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    int rows = (int)fminf(fmaxf(tileRows, 1.0f), 10.0f);
+    int cols = (int)fminf(fmaxf(tileCols, 1.0f), 10.0f);
+    float cellW = (float)w / (float)cols;
+    float cellH = (float)h / (float)rows;
+    int cellX = (int)((float)px / cellW);
+    int cellY = (int)((float)py / cellH);
+
+    float offsetX = 0, offsetY = 0;
+    if (tileOffsetX != 0 || tileOffsetY != 0) {
+        float rndX = phash((float)cellX + tileRandomSeed, (float)cellY) - 0.5f;
+        float rndY = phash((float)cellX + 100.0f + tileRandomSeed, (float)cellY + 100.0f) - 0.5f;
+        offsetX = tileOffsetX * rndX * cellW;
+        offsetY = tileOffsetY * rndY * cellH;
+    }
+
+    float srcX = fmodf((float)px + offsetX + w * 2, (float)w);
+    float srcY = fmodf((float)py + offsetY + h * 2, (float)h);
+
+    int idx = (py * w + px) * 4;
+    for (int c = 0; c < 4; c++)
+        dst[idx + c] = bilerp(src, w, h, srcX, srcY, c);
+}
+
+// 8. Time Waver
+__global__ void timeWaverKernel(const float* src, float* dst, int w, int h,
+    float waverAmount, float waverSpeed, float waverBlockSize, float time) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    float t = time * waverSpeed;
+    float offset = waverAmount * sinf(t * 3.14159f);
+    int blockSize = (int)fminf(fmaxf(waverBlockSize, 4.0f), 128.0f);
+
+    int blockX = px / blockSize;
+    int blockY = py / blockSize;
+    float blockRnd = phash((float)blockX + t, (float)blockY + t);
+    float jitter = (blockRnd - 0.5f) * 2.0f * offset;
+
+    int idx = (py * w + px) * 4;
+    for (int c = 0; c < 4; c++) {
+        float curr = src[idx + c];
+        float jitterColor = phash((float)px + time, (float)py + time * 0.5f) * jitter * 0.1f;
+        dst[idx + c] = curr * 0.85f + jitterColor;
+    }
+}
+
+// 19. Block Shuffle
+__global__ void blockShuffleKernel(const float* src, float* dst, int w, int h,
+    float blockSize, float amount, float seed) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    int bs = (int)fmaxf(blockSize, 8.0f);
+    int blocksX = w / bs;
+    int blocksY = h / bs;
+    if (blocksX <= 0 || blocksY <= 0) {
+        int idx = (py * w + px) * 4;
+        dst[idx] = src[idx]; dst[idx+1] = src[idx+1]; dst[idx+2] = src[idx+2]; dst[idx+3] = src[idx+3];
+        return;
+    }
+
+    int bi = py / bs;
+    int bj = px / bs;
+    int blockIdx = bi * blocksX + bj;
+    int swapIdx = (blockIdx + 1) % (blocksX * blocksY);
+    int targetBi = swapIdx / blocksX;
+    int targetBj = swapIdx % blocksX;
+
+    float swapAmount = fminf(amount, 1.0f);
+    if (phash((float)blockIdx + seed, (float)blockIdx * 0.5f) > swapAmount) {
+        int idx = (py * w + px) * 4;
+        dst[idx] = src[idx]; dst[idx+1] = src[idx+1]; dst[idx+2] = src[idx+2]; dst[idx+3] = src[idx+3];
+        return;
+    }
+
+    int srcX = targetBj * bs + (px % bs);
+    int srcY = targetBi * bs + (py % bs);
+    if (srcX >= w) srcX = w - 1;
+    if (srcY >= h) srcY = h - 1;
+    int srcIdx = (srcY * w + srcX) * 4;
+    int dstIdx = (py * w + px) * 4;
+    dst[dstIdx] = src[srcIdx]; dst[dstIdx+1] = src[srcIdx+1]; dst[dstIdx+2] = src[srcIdx+2]; dst[dstIdx+3] = src[srcIdx+3];
+}
+
+// 20. Scanlines
+__global__ void scanlinesKernel(const float* src, float* dst, int w, int h,
+    float spacing, float offset, float warp, float speed, float time) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    int sp = (int)fmaxf(spacing, 1.0f);
+    float t = time * speed;
+    int lineIdx = (py + (int)(offset + t * 10.0f)) % sp;
+
+    int idx = (py * w + px) * 4;
+    if (lineIdx == 0) {
+        float wobble = warp * sinf((float)py * 0.1f + t);
+        int sx = px + (int)wobble;
+        if (sx < 0) sx = 0; if (sx >= w) sx = w - 1;
+        int srcIdx = (py * w + sx) * 4;
+        dst[idx] = src[srcIdx]; dst[idx+1] = src[srcIdx+1]; dst[idx+2] = src[srcIdx+2]; dst[idx+3] = src[srcIdx+3];
+    } else {
+        dst[idx] = src[idx]; dst[idx+1] = src[idx+1]; dst[idx+2] = src[idx+2]; dst[idx+3] = src[idx+3];
+    }
+}
+
+// 23. Vortex
+__global__ void vortexKernel(const float* src, float* dst, int w, int h,
+    float centerX, float centerY, float strength, float radius, float speed, float time) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    float cx = centerX * (float)w;
+    float cy = centerY * (float)h;
+    float r = radius * (float)fminf(w, h);
+    float dx = (float)px - cx;
+    float dy = (float)py - cy;
+    float dist = sqrtf(dx * dx + dy * dy);
+
+    int idx = (py * w + px) * 4;
+    if (dist < r && dist > 0.1f) {
+        float factor = 1.0f - dist / r;
+        float t = time * speed;
+        float angle = atan2f(dy, dx) + strength * factor * factor * (1.0f + t);
+        float nx = cx + cosf(angle) * dist;
+        float ny = cy + sinf(angle) * dist;
+        for (int c = 0; c < 4; c++)
+            dst[idx + c] = bilerp(src, w, h, nx, ny, c);
+    } else {
+        dst[idx] = src[idx]; dst[idx+1] = src[idx+1]; dst[idx+2] = src[idx+2]; dst[idx+3] = src[idx+3];
+    }
+}
+
+// 24. Wave Distort
+__global__ void waveDistortKernel(const float* src, float* dst, int w, int h,
+    float freqX, float freqY, float ampX, float ampY, float speed, float time) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    float t = time * speed;
+    float offsetX = sinf(py * freqX * 0.01f + t) * ampX;
+    float offsetY = sinf(px * freqY * 0.01f + t * 1.3f) * ampY;
+    float sx = (float)px + offsetX;
+    float sy = (float)py + offsetY;
+
+    int idx = (py * w + px) * 4;
+    for (int c = 0; c < 4; c++)
+        dst[idx + c] = bilerp(src, w, h, sx, sy, c);
+}
+
+// 25. Twist
+__global__ void twistKernel(const float* src, float* dst, int w, int h,
+    float centerX, float centerY, float amount, float radius, float sharpness, float time) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    float cx = centerX * (float)w;
+    float cy = centerY * (float)h;
+    float r = radius * (float)fminf(w, h);
+    float dx = (float)px - cx;
+    float dy = (float)py - cy;
+    float dist = sqrtf(dx * dx + dy * dy);
+
+    int idx = (py * w + px) * 4;
+    if (dist < r && dist > 0.1f && fabsf(amount) > 0.01f) {
+        float factor = powf(1.0f - dist / r, sharpness);
+        float angle = amount * factor;
+        float cs = cosf(angle);
+        float sn = sinf(angle);
+        float nx = cx + dx * cs - dy * sn;
+        float ny = cy + dx * sn + dy * cs;
+        for (int c = 0; c < 4; c++)
+            dst[idx + c] = bilerp(src, w, h, nx, ny, c);
+    } else {
+        dst[idx] = src[idx]; dst[idx+1] = src[idx+1]; dst[idx+2] = src[idx+2]; dst[idx+3] = src[idx+3];
+    }
+}
+
+// 21. Pixel Sort (horizontal) - simplified version
+__global__ void pixelSortKernel(const float* src, float* dst, int w, int h,
+    float threshold, float direction, float amount) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= w || py >= h) return;
+
+    int idx = (py * w + px) * 4;
+    float lum = src[idx] * 0.299f + src[idx + 1] * 0.587f + src[idx + 2] * 0.114f;
+
+    if (direction < 0.5f) {
+        // Horizontal - simpler version: just shift based on brightness
+        if (lum > threshold) {
+            int offset = (int)((lum - threshold) * amount * w);
+            int srcX = px + offset;
+            if (srcX >= w) srcX = w - 1;
+            int srcIdx = (py * w + srcX) * 4;
+            dst[idx] = src[srcIdx]; dst[idx+1] = src[srcIdx+1]; dst[idx+2] = src[srcIdx+2]; dst[idx+3] = src[srcIdx+3];
+        } else {
+            dst[idx] = src[idx]; dst[idx+1] = src[idx+1]; dst[idx+2] = src[idx+2]; dst[idx+3] = src[idx+3];
+        }
+    } else {
+        // Vertical
+        if (lum > threshold) {
+            int offset = (int)((lum - threshold) * amount * h);
+            int srcY = py + offset;
+            if (srcY >= h) srcY = h - 1;
+            int srcIdx = (srcY * w + px) * 4;
+            dst[idx] = src[srcIdx]; dst[idx+1] = src[srcIdx+1]; dst[idx+2] = src[srcIdx+2]; dst[idx+3] = src[srcIdx+3];
+        } else {
+            dst[idx] = src[idx]; dst[idx+1] = src[idx+1]; dst[idx+2] = src[idx+2]; dst[idx+3] = src[idx+3];
+        }
+    }
+}
+
+// 22. Edge Distort
+__global__ void edgeDistortKernel(const float* src, float* dst, int w, int h,
+    float threshold, float amount, float scale) {
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px < 1 || px >= w-1 || py < 1 || py >= h-1) {
+        int idx = (py * w + px) * 4;
+        dst[idx] = src[idx]; dst[idx+1] = src[idx+1]; dst[idx+2] = src[idx+2]; dst[idx+3] = src[idx+3];
+        return;
+    }
+
+    int idx = (py * w + px) * 4;
+    float lum = src[idx] * 0.299f + src[idx + 1] * 0.587f + src[idx + 2] * 0.114f;
+    float lumL = src[idx - 4] * 0.299f + src[idx - 3] * 0.587f + src[idx - 2] * 0.114f;
+    float lumR = src[idx + 4] * 0.299f + src[idx + 5] * 0.587f + src[idx + 6] * 0.114f;
+    float lumT = src[idx - w*4] * 0.299f + src[idx - w*4 + 1] * 0.587f + src[idx - w*4 + 2] * 0.114f;
+    float lumB = src[idx + w*4] * 0.299f + src[idx + w*4 + 1] * 0.587f + src[idx + w*4 + 2] * 0.114f;
+    float edgeX = fabsf(lumR - lumL);
+    float edgeY = fabsf(lumB - lumT);
+    float edge = sqrtf(edgeX * edgeX + edgeY * edgeY);
+
+    if (edge > threshold) {
+        float dispX = sinf((float)px * scale + (float)py * scale * 0.7f) * amount * edge;
+        float dispY = cosf((float)px * scale * 0.8f + (float)py * scale) * amount * edge;
+        int sx = px + (int)dispX;
+        int sy = py + (int)dispY;
+        if (sx < 0) sx = 0; if (sx >= w) sx = w - 1;
+        if (sy < 0) sy = 0; if (sy >= h) sy = h - 1;
+        int srcIdx = (sy * w + sx) * 4;
+        dst[idx] = src[srcIdx]; dst[idx+1] = src[srcIdx+1]; dst[idx+2] = src[srcIdx+2]; dst[idx+3] = src[srcIdx+3];
+    } else {
+        dst[idx] = src[idx]; dst[idx+1] = src[idx+1]; dst[idx+2] = src[idx+2]; dst[idx+3] = src[idx+3];
+    }
+}
+
+// Main distortion launcher
+extern "C" void RunCudaDistortionPass(void* stream, float* dst, int w, int h,
+    // Fluid Morph
+    float fluidEnable, float fluidBlobCount, float fluidThreshold,
+    float fluidJitter, float fluidSpeed,
+    // Mirror Fractal
+    float mirrorFractalEnable, float mirrorDepth, float mirrorRotateEach,
+    float mirrorScale, float mirrorSeed,
+    // Glitch Slice
+    float glitchSliceEnable, float sliceCount, float sliceDisplaceAmt,
+    float sliceRandSeed, float sliceRGBSplit,
+    // Triangulate
+    float triangulateEnable, float triPointCount, float triEdgeThickness,
+    float triEdgeColorR, float triEdgeColorG, float triEdgeColorB,
+    float triFillVariant,
+    // Water Ripple
+    float rippleEnable, float rippleCenterX, float rippleCenterY,
+    float rippleFrequency, float rippleAmplitude, float rippleDecay,
+    float rippleSpeed, float ripplePhase,
+    // Displacement
+    float displacementEnable, float dispStrength, float dispScale,
+    float dispChannel, float dispDirection,
+    // Tile Repeat
+    float tileEnable, float tileRows, float tileCols,
+    float tileOffsetX, float tileOffsetY, float tileRandomSeed,
+    // Time Waver
+    float timeWaverEnable, float waverAmount, float waverSpeed, float waverBlockSize,
+    // New effects (10 more)
+    float perlinEnable, float perlinScale, float perlinAmount, float perlinOctaves, float perlinSpeed, float perlinSeed,
+    float polarEnable, float polarMode, float polarCenterX, float polarCenterY, float polarRadius, float polarAngle,
+    float chromaWaveEnable, float chromaWaveFreq, float chromaWaveAmp, float chromaWaveSpeed, float chromaWaveOffset,
+    float rgbShiftEnable, float rgbShiftAmount, float rgbShiftAngle, float rgbShiftSpeed, float rgbShiftR, float rgbShiftG, float rgbShiftB,
+    float lensCurveEnable, float lensCurveAmount, float lensCurvePower, float lensCurveCenterX, float lensCurveCenterY,
+    float sineWarpEnable, float sineWarpFreqX, float sineWarpFreqY, float sineWarpAmp, float sineWarpOctaves, float sineWarpSpeed,
+    float spiralWarpEnable, float spiralWarpTwist, float spiralWarpZoom, float spiralWarpCenterX, float spiralWarpCenterY, float spiralWarpSpeed,
+    float noiseDispEnable, float noiseDispScale, float noiseDispAmount, float noiseDispSeed, float noiseDispChannel, float noiseDispTime,
+    float radialBlurEnable, float radialBlurAmount, float radialBlurCenterX, float radialBlurCenterY, float radialBlurSamples, float radialBlurTime,
+    float circleEnable, float circleCenterX, float circleCenterY, float circleInnerRadius, float circleOuterRadius, float circleSoftness, float circleInvert,
+    // New effects (19-25)
+    float blockShuffleEnable, float blockShuffleSize, float blockShuffleAmount, float blockShuffleSeed,
+    float scanlinesEnable, float scanlinesSpacing, float scanlinesOffset, float scanlinesWarp, float scanlinesSpeed,
+    float pixelSortEnable, float pixelSortThreshold, float pixelSortDirection, float pixelSortAmount,
+    float edgeDistortEnable, float edgeDistortThreshold, float edgeDistortAmount, float edgeDistortScale,
+    float vortexEnable, float vortexCenterX, float vortexCenterY, float vortexStrength, float vortexRadius, float vortexSpeed,
+    float waveDistortEnable, float waveDistortFreqX, float waveDistortFreqY, float waveDistortAmpX, float waveDistortAmpY, float waveDistortSpeed,
+    float twistEnable, float twistCenterX, float twistCenterY, float twistAmount, float twistRadius, float twistSharpness,
+    // Animation
+    float time,
+    // Grow mask
+    float growProgress, float growRadial, float growDirection, float growSoftness)
+{
+    // Check if any effect enabled
+    bool hasAny = (fluidEnable > 0.5f || mirrorFractalEnable > 0.5f || glitchSliceEnable > 0.5f ||
+                   triangulateEnable > 0.5f || rippleEnable > 0.5f || displacementEnable > 0.5f ||
+                   tileEnable > 0.5f || timeWaverEnable > 0.5f ||
+                   perlinEnable > 0.5f || polarEnable > 0.5f || chromaWaveEnable > 0.5f ||
+                   rgbShiftEnable > 0.5f || lensCurveEnable > 0.5f || sineWarpEnable > 0.5f ||
+                   spiralWarpEnable > 0.5f || noiseDispEnable > 0.5f || radialBlurEnable > 0.5f ||
+                   circleEnable > 0.5f ||
+                   blockShuffleEnable > 0.5f || scanlinesEnable > 0.5f || pixelSortEnable > 0.5f ||
+                   edgeDistortEnable > 0.5f || vortexEnable > 0.5f || waveDistortEnable > 0.5f ||
+                   twistEnable > 0.5f);
+    if (!hasAny) return;
+
+    // Allocate temp buffer
+    int n = w * h * 4;
+    float* tmp = nullptr;
+    cudaMalloc(&tmp, n * sizeof(float));
+    cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                    static_cast<cudaStream_t>(stream));
+
+    dim3 blk(16, 16), grd((w + 15) / 16, (h + 15) / 16);
+
+    // Apply each enabled effect
+    if (fluidEnable > 0.5f) {
+        fluidMorphKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, fluidBlobCount, fluidThreshold, fluidJitter, fluidSpeed, time);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (mirrorFractalEnable > 0.5f) {
+        mirrorFractalKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, mirrorDepth, mirrorRotateEach, mirrorScale);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (glitchSliceEnable > 0.5f) {
+        glitchSliceKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, sliceCount, sliceDisplaceAmt, sliceRandSeed, sliceRGBSplit, time);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (triangulateEnable > 0.5f) {
+        triangulateKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, triPointCount, triEdgeThickness, triEdgeColorR, triEdgeColorG, triEdgeColorB,
+            triFillVariant, mirrorSeed);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (rippleEnable > 0.5f) {
+        waterRippleKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, rippleCenterX, rippleCenterY, rippleFrequency, rippleAmplitude,
+            rippleDecay, rippleSpeed, ripplePhase);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (displacementEnable > 0.5f) {
+        displacementMapKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, dispStrength, dispScale, dispChannel, dispDirection);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (tileEnable > 0.5f) {
+        tileRepeatKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, tileRows, tileCols, tileOffsetX, tileOffsetY, tileRandomSeed);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (timeWaverEnable > 0.5f) {
+        timeWaverKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, waverAmount, waverSpeed, waverBlockSize, time);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    // New CUDA effects
+    if (blockShuffleEnable > 0.5f) {
+        blockShuffleKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, blockShuffleSize, blockShuffleAmount, blockShuffleSeed);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (scanlinesEnable > 0.5f) {
+        scanlinesKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, scanlinesSpacing, scanlinesOffset, scanlinesWarp, scanlinesSpeed, time);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (pixelSortEnable > 0.5f) {
+        pixelSortKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, pixelSortThreshold, pixelSortDirection, pixelSortAmount);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (edgeDistortEnable > 0.5f) {
+        edgeDistortKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, edgeDistortThreshold, edgeDistortAmount, edgeDistortScale);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (vortexEnable > 0.5f) {
+        vortexKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, vortexCenterX, vortexCenterY, vortexStrength, vortexRadius, vortexSpeed, time);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (waveDistortEnable > 0.5f) {
+        waveDistortKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, waveDistortFreqX, waveDistortFreqY, waveDistortAmpX, waveDistortAmpY, waveDistortSpeed, time);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    if (twistEnable > 0.5f) {
+        twistKernel<<<grd, blk, 0, static_cast<cudaStream_t>(stream)>>>(
+            tmp, dst, w, h, twistCenterX, twistCenterY, twistAmount, twistRadius, twistSharpness, time);
+        cudaMemcpyAsync(tmp, dst, n * sizeof(float), cudaMemcpyDeviceToDevice,
+                        static_cast<cudaStream_t>(stream));
+    }
+
+    cudaFree(tmp);
+}

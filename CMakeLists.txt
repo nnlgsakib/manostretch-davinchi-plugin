@@ -79,6 +79,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 # Plugin source
 set(PLUGIN_SOURCES
     src/ManoStretch.cpp
+    src/DistortionCPU.cpp
 )
 
 # OFX Support library sources

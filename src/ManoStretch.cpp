@@ -7,6 +7,7 @@
 #include "ofxsImageEffect.h"
 #include "ofxsParam.h"
 #include "ofxsInteract.h"
+#include "DistortionFX.h"
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -73,6 +74,55 @@ extern "C" void RunCudaSurrealismPass(void* stream, float* dst,
     float solarize, float colorInvert, float time,
     float spatialSpinSpeed, float spatialKaleidoRotate,
     float spatialMeltPulse, float spatialMeltPulseFreq, float spatialEvolveSpeed,
+    float growProgress, float growRadial, float growDirection, float growSoftness);
+extern "C" void RunCudaDistortionPass(void* stream, float* dst, int w, int h,
+    // Fluid Morph
+    float fluidEnable, float fluidBlobCount, float fluidThreshold,
+    float fluidJitter, float fluidSpeed,
+    // Mirror Fractal
+    float mirrorFractalEnable, float mirrorDepth, float mirrorRotateEach,
+    float mirrorScale, float mirrorSeed,
+    // Glitch Slice
+    float glitchSliceEnable, float sliceCount, float sliceDisplaceAmt,
+    float sliceRandSeed, float sliceRGBSplit,
+    // Triangulate
+    float triangulateEnable, float triPointCount, float triEdgeThickness,
+    float triEdgeColorR, float triEdgeColorG, float triEdgeColorB,
+    float triFillVariant,
+    // Water Ripple
+    float rippleEnable, float rippleCenterX, float rippleCenterY,
+    float rippleFrequency, float rippleAmplitude, float rippleDecay,
+    float rippleSpeed, float ripplePhase,
+    // Displacement
+    float displacementEnable, float dispStrength, float dispScale,
+    float dispChannel, float dispDirection,
+    // Tile Repeat
+    float tileEnable, float tileRows, float tileCols,
+    float tileOffsetX, float tileOffsetY, float tileRandomSeed,
+    // Time Waver
+    float timeWaverEnable, float waverAmount, float waverSpeed, float waverBlockSize,
+    // New effects (10 more)
+    float perlinEnable, float perlinScale, float perlinAmount, float perlinOctaves, float perlinSpeed, float perlinSeed,
+    float polarEnable, float polarMode, float polarCenterX, float polarCenterY, float polarRadius, float polarAngle,
+    float chromaWaveEnable, float chromaWaveFreq, float chromaWaveAmp, float chromaWaveSpeed, float chromaWaveOffset,
+    float rgbShiftEnable, float rgbShiftAmount, float rgbShiftAngle, float rgbShiftSpeed, float rgbShiftR, float rgbShiftG, float rgbShiftB,
+    float lensCurveEnable, float lensCurveAmount, float lensCurvePower, float lensCurveCenterX, float lensCurveCenterY,
+    float sineWarpEnable, float sineWarpFreqX, float sineWarpFreqY, float sineWarpAmp, float sineWarpOctaves, float sineWarpSpeed,
+    float spiralWarpEnable, float spiralWarpTwist, float spiralWarpZoom, float spiralWarpCenterX, float spiralWarpCenterY, float spiralWarpSpeed,
+    float noiseDispEnable, float noiseDispScale, float noiseDispAmount, float noiseDispSeed, float noiseDispChannel, float noiseDispTime,
+    float radialBlurEnable, float radialBlurAmount, float radialBlurCenterX, float radialBlurCenterY, float radialBlurSamples, float radialBlurTime,
+    float circleEnable, float circleCenterX, float circleCenterY, float circleInnerRadius, float circleOuterRadius, float circleSoftness, float circleInvert,
+    // New effects (19-25)
+    float blockShuffleEnable, float blockShuffleSize, float blockShuffleAmount, float blockShuffleSeed,
+    float scanlinesEnable, float scanlinesSpacing, float scanlinesOffset, float scanlinesWarp, float scanlinesSpeed,
+    float pixelSortEnable, float pixelSortThreshold, float pixelSortDirection, float pixelSortAmount,
+    float edgeDistortEnable, float edgeDistortThreshold, float edgeDistortAmount, float edgeDistortScale,
+    float vortexEnable, float vortexCenterX, float vortexCenterY, float vortexStrength, float vortexRadius, float vortexSpeed,
+    float waveDistortEnable, float waveDistortFreqX, float waveDistortFreqY, float waveDistortAmpX, float waveDistortAmpY, float waveDistortSpeed,
+    float twistEnable, float twistCenterX, float twistCenterY, float twistAmount, float twistRadius, float twistSharpness,
+    // Animation
+    float time,
+    // Grow mask
     float growProgress, float growRadial, float growDirection, float growSoftness);
 #endif
 
@@ -853,6 +903,99 @@ public:
         m_SurrGrowRadial     = fetchDoubleParam("surrGrowRadial");
         m_SurrGrowDirection  = fetchDoubleParam("surrGrowDirection");
         m_SurrGrowSoftness   = fetchDoubleParam("surrGrowSoftness");
+
+        // Fluid Morph
+        m_DistFluidEnable = fetchBooleanParam("distFluidEnable");
+        m_DistFluidBlobCount = fetchDoubleParam("distFluidBlobCount");
+        m_DistFluidThreshold = fetchDoubleParam("distFluidThreshold");
+        m_DistFluidJitter = fetchDoubleParam("distFluidJitter");
+        m_DistFluidSpeed = fetchDoubleParam("distFluidSpeed");
+        // Mirror Fractal
+        m_DistMirrorFractalEnable = fetchBooleanParam("distMirrorFractalEnable");
+        m_DistMirrorDepth = fetchDoubleParam("distMirrorDepth");
+        m_DistMirrorRotateEach = fetchDoubleParam("distMirrorRotateEach");
+        m_DistMirrorScale = fetchDoubleParam("distMirrorScale");
+        // Glitch Slice
+        m_DistGlitchSliceEnable = fetchBooleanParam("distGlitchSliceEnable");
+        m_DistSliceCount = fetchDoubleParam("distSliceCount");
+        m_DistSliceDisplaceAmt = fetchDoubleParam("distSliceDisplaceAmt");
+        m_DistSliceRandSeed = fetchDoubleParam("distSliceRandSeed");
+        m_DistSliceRGBSplit = fetchDoubleParam("distSliceRGBSplit");
+        // Triangulate
+        m_DistTriangulateEnable = fetchBooleanParam("distTriangulateEnable");
+        m_DistTriPointCount = fetchDoubleParam("distTriPointCount");
+        m_DistTriEdgeThickness = fetchDoubleParam("distTriEdgeThickness");
+        m_DistTriFillVariant = fetchDoubleParam("distTriFillVariant");
+        m_DistTriEdgeColor = fetchRGBParam("distTriEdgeColor");
+        // Water Ripple
+        m_DistRippleEnable = fetchBooleanParam("distRippleEnable");
+        m_DistRippleCenterX = fetchDoubleParam("distRippleCenterX");
+        m_DistRippleCenterY = fetchDoubleParam("distRippleCenterY");
+        m_DistRippleFrequency = fetchDoubleParam("distRippleFrequency");
+        m_DistRippleAmplitude = fetchDoubleParam("distRippleAmplitude");
+        m_DistRippleDecay = fetchDoubleParam("distRippleDecay");
+        m_DistRippleSpeed = fetchDoubleParam("distRippleSpeed");
+        m_DistRipplePhase = fetchDoubleParam("distRipplePhase");
+        // Displacement Map
+        m_DistDisplacementEnable = fetchBooleanParam("distDisplacementEnable");
+        m_DistDispStrength = fetchDoubleParam("distDispStrength");
+        m_DistDispScale = fetchDoubleParam("distDispScale");
+        m_DistDispChannel = fetchDoubleParam("distDispChannel");
+        m_DistDispDirection = fetchDoubleParam("distDispDirection");
+        // Tile/Repeat
+        m_DistTileEnable = fetchBooleanParam("distTileEnable");
+        m_DistTileRows = fetchDoubleParam("distTileRows");
+        m_DistTileCols = fetchDoubleParam("distTileCols");
+        m_DistTileOffsetX = fetchDoubleParam("distTileOffsetX");
+        m_DistTileOffsetY = fetchDoubleParam("distTileOffsetY");
+        m_DistTileRandomSeed = fetchDoubleParam("distTileRandomSeed");
+        // Time Waver
+        m_DistTimeWaverEnable = fetchBooleanParam("distTimeWaverEnable");
+        m_DistWaverAmount = fetchDoubleParam("distWaverAmount");
+        m_DistWaverSpeed = fetchDoubleParam("distWaverSpeed");
+        m_DistWaverBlockSize = fetchDoubleParam("distWaverBlockSize");
+        // Block Shuffle
+        m_DistBlockShuffleEnable = fetchBooleanParam("distBlockShuffleEnable");
+        m_DistBlockShuffleSize = fetchDoubleParam("distBlockShuffleSize");
+        m_DistBlockShuffleAmount = fetchDoubleParam("distBlockShuffleAmount");
+        m_DistBlockShuffleSeed = fetchDoubleParam("distBlockShuffleSeed");
+        // Scanlines
+        m_DistScanlinesEnable = fetchBooleanParam("distScanlinesEnable");
+        m_DistScanlinesSpacing = fetchDoubleParam("distScanlinesSpacing");
+        m_DistScanlinesOffset = fetchDoubleParam("distScanlinesOffset");
+        m_DistScanlinesWarp = fetchDoubleParam("distScanlinesWarp");
+        m_DistScanlinesSpeed = fetchDoubleParam("distScanlinesSpeed");
+        // Pixel Sort
+        m_DistPixelSortEnable = fetchBooleanParam("distPixelSortEnable");
+        m_DistPixelSortThreshold = fetchDoubleParam("distPixelSortThreshold");
+        m_DistPixelSortDirection = fetchDoubleParam("distPixelSortDirection");
+        m_DistPixelSortAmount = fetchDoubleParam("distPixelSortAmount");
+        // Edge Distort
+        m_DistEdgeDistortEnable = fetchBooleanParam("distEdgeDistortEnable");
+        m_DistEdgeDistortThreshold = fetchDoubleParam("distEdgeDistortThreshold");
+        m_DistEdgeDistortAmount = fetchDoubleParam("distEdgeDistortAmount");
+        m_DistEdgeDistortScale = fetchDoubleParam("distEdgeDistortScale");
+        // Vortex
+        m_DistVortexEnable = fetchBooleanParam("distVortexEnable");
+        m_DistVortexCenterX = fetchDoubleParam("distVortexCenterX");
+        m_DistVortexCenterY = fetchDoubleParam("distVortexCenterY");
+        m_DistVortexStrength = fetchDoubleParam("distVortexStrength");
+        m_DistVortexRadius = fetchDoubleParam("distVortexRadius");
+        m_DistVortexSpeed = fetchDoubleParam("distVortexSpeed");
+        // Wave Distort
+        m_DistWaveDistortEnable = fetchBooleanParam("distWaveDistortEnable");
+        m_DistWaveDistortFreqX = fetchDoubleParam("distWaveDistortFreqX");
+        m_DistWaveDistortFreqY = fetchDoubleParam("distWaveDistortFreqY");
+        m_DistWaveDistortAmpX = fetchDoubleParam("distWaveDistortAmpX");
+        m_DistWaveDistortAmpY = fetchDoubleParam("distWaveDistortAmpY");
+        m_DistWaveDistortSpeed = fetchDoubleParam("distWaveDistortSpeed");
+        // Twist
+        m_DistTwistEnable = fetchBooleanParam("distTwistEnable");
+        m_DistTwistCenterX = fetchDoubleParam("distTwistCenterX");
+        m_DistTwistCenterY = fetchDoubleParam("distTwistCenterY");
+        m_DistTwistAmount = fetchDoubleParam("distTwistAmount");
+        m_DistTwistRadius = fetchDoubleParam("distTwistRadius");
+        m_DistTwistSharpness = fetchDoubleParam("distTwistSharpness");
     }
 
     virtual void render(const RenderArguments& a) {
@@ -942,6 +1085,141 @@ public:
             m_SurrGrowSoftness->getValueAtTime(a.time, v);   sfx.growSoftness  = (float)(v / 100.0);
         }
 
+        // New Distortion FX params
+        DistortionFX dx;
+        initDistortionFX(dx);
+        dx.time = (float)a.time;
+        dx.growProgress = sfx.growProgress;
+        dx.growRadial = sfx.growRadial;
+        dx.growDirection = sfx.growDirection;
+        dx.growSoftness = sfx.growSoftness;
+
+        bool bDistortion = false;
+
+        // Fluid Morph
+        m_DistFluidEnable->getValue(bDistortion);
+        m_DistFluidBlobCount->getValueAtTime(a.time, v); dx.fluidBlobCount = (float)v;
+        m_DistFluidThreshold->getValueAtTime(a.time, v); dx.fluidThreshold = (float)v;
+        m_DistFluidJitter->getValueAtTime(a.time, v); dx.fluidJitter = (float)v;
+        m_DistFluidSpeed->getValueAtTime(a.time, v); dx.fluidSpeed = (float)v;
+        if (bDistortion) dx.fluidEnable = 1.0f;
+
+        // Mirror Fractal
+        m_DistMirrorFractalEnable->getValue(bDistortion);
+        m_DistMirrorDepth->getValueAtTime(a.time, v); dx.mirrorDepth = (float)v;
+        m_DistMirrorRotateEach->getValueAtTime(a.time, v); dx.mirrorRotateEach = (float)v;
+        m_DistMirrorScale->getValueAtTime(a.time, v); dx.mirrorScale = (float)v;
+        if (bDistortion) dx.mirrorFractalEnable = 1.0f;
+
+        // Glitch Slice
+        m_DistGlitchSliceEnable->getValue(bDistortion);
+        m_DistSliceCount->getValueAtTime(a.time, v); dx.sliceCount = (float)v;
+        m_DistSliceDisplaceAmt->getValueAtTime(a.time, v); dx.sliceDisplaceAmt = (float)v;
+        m_DistSliceRandSeed->getValueAtTime(a.time, v); dx.sliceRandSeed = (float)v;
+        m_DistSliceRGBSplit->getValueAtTime(a.time, v); dx.sliceRGBSplit = (float)v;
+        if (bDistortion) dx.glitchSliceEnable = 1.0f;
+
+        // Triangulate
+        m_DistTriangulateEnable->getValue(bDistortion);
+        m_DistTriPointCount->getValueAtTime(a.time, v); dx.triPointCount = (float)v;
+        m_DistTriEdgeThickness->getValueAtTime(a.time, v); dx.triEdgeThickness = (float)v;
+        m_DistTriFillVariant->getValueAtTime(a.time, v); dx.triFillVariant = (float)v;
+        { double cr,cg,cb; m_DistTriEdgeColor->getValueAtTime(a.time, cr,cg,cb);
+          dx.triEdgeColor[0]=(float)cr; dx.triEdgeColor[1]=(float)cg; dx.triEdgeColor[2]=(float)cb; }
+        if (bDistortion) dx.triangulateEnable = 1.0f;
+
+        // Water Ripple
+        m_DistRippleEnable->getValue(bDistortion);
+        m_DistRippleCenterX->getValueAtTime(a.time, v); dx.rippleCenterX = (float)v;
+        m_DistRippleCenterY->getValueAtTime(a.time, v); dx.rippleCenterY = (float)v;
+        m_DistRippleFrequency->getValueAtTime(a.time, v); dx.rippleFrequency = (float)v;
+        m_DistRippleAmplitude->getValueAtTime(a.time, v); dx.rippleAmplitude = (float)v;
+        m_DistRippleDecay->getValueAtTime(a.time, v); dx.rippleDecay = (float)v;
+        m_DistRippleSpeed->getValueAtTime(a.time, v); dx.rippleSpeed = (float)v;
+        m_DistRipplePhase->getValueAtTime(a.time, v); dx.ripplePhase = (float)v;
+        if (bDistortion) dx.rippleEnable = 1.0f;
+
+        // Displacement Map
+        m_DistDisplacementEnable->getValue(bDistortion);
+        m_DistDispStrength->getValueAtTime(a.time, v); dx.dispStrength = (float)v;
+        m_DistDispScale->getValueAtTime(a.time, v); dx.dispScale = (float)v;
+        m_DistDispChannel->getValueAtTime(a.time, v); dx.dispChannel = (float)v;
+        m_DistDispDirection->getValueAtTime(a.time, v); dx.dispDirection = (float)v;
+        if (bDistortion) dx.displacementEnable = 1.0f;
+
+        // Tile/Repeat
+        m_DistTileEnable->getValue(bDistortion);
+        m_DistTileRows->getValueAtTime(a.time, v); dx.tileRows = (float)v;
+        m_DistTileCols->getValueAtTime(a.time, v); dx.tileCols = (float)v;
+        m_DistTileOffsetX->getValueAtTime(a.time, v); dx.tileOffsetX = (float)v;
+        m_DistTileOffsetY->getValueAtTime(a.time, v); dx.tileOffsetY = (float)v;
+        m_DistTileRandomSeed->getValueAtTime(a.time, v); dx.tileRandomSeed = (float)v;
+        if (bDistortion) dx.tileEnable = 1.0f;
+
+        // Time Waver
+        m_DistTimeWaverEnable->getValue(bDistortion);
+        m_DistWaverAmount->getValueAtTime(a.time, v); dx.waverAmount = (float)v;
+        m_DistWaverSpeed->getValueAtTime(a.time, v); dx.waverSpeed = (float)v;
+        m_DistWaverBlockSize->getValueAtTime(a.time, v); dx.waverBlockSize = (float)v;
+        if (bDistortion) dx.timeWaverEnable = 1.0f;
+        if (bDistortion) dx.mirrorSeed = 12345; // for trianglize
+
+        // Block Shuffle
+        m_DistBlockShuffleEnable->getValue(bDistortion);
+        m_DistBlockShuffleSize->getValueAtTime(a.time, v); dx.blockShuffleSize = (float)v;
+        m_DistBlockShuffleAmount->getValueAtTime(a.time, v); dx.blockShuffleAmount = (float)v;
+        m_DistBlockShuffleSeed->getValueAtTime(a.time, v); dx.blockShuffleSeed = (float)v;
+        if (bDistortion) dx.blockShuffleEnable = 1.0f;
+
+        // Scanlines
+        m_DistScanlinesEnable->getValue(bDistortion);
+        m_DistScanlinesSpacing->getValueAtTime(a.time, v); dx.scanlinesSpacing = (float)v;
+        m_DistScanlinesOffset->getValueAtTime(a.time, v); dx.scanlinesOffset = (float)v;
+        m_DistScanlinesWarp->getValueAtTime(a.time, v); dx.scanlinesWarp = (float)v;
+        m_DistScanlinesSpeed->getValueAtTime(a.time, v); dx.scanlinesSpeed = (float)v;
+        if (bDistortion) dx.scanlinesEnable = 1.0f;
+
+        // Pixel Sort
+        m_DistPixelSortEnable->getValue(bDistortion);
+        m_DistPixelSortThreshold->getValueAtTime(a.time, v); dx.pixelSortThreshold = (float)v;
+        m_DistPixelSortDirection->getValueAtTime(a.time, v); dx.pixelSortDirection = (float)v;
+        m_DistPixelSortAmount->getValueAtTime(a.time, v); dx.pixelSortAmount = (float)v;
+        if (bDistortion) dx.pixelSortEnable = 1.0f;
+
+        // Edge Distort
+        m_DistEdgeDistortEnable->getValue(bDistortion);
+        m_DistEdgeDistortThreshold->getValueAtTime(a.time, v); dx.edgeDistortThreshold = (float)v;
+        m_DistEdgeDistortAmount->getValueAtTime(a.time, v); dx.edgeDistortAmount = (float)v;
+        m_DistEdgeDistortScale->getValueAtTime(a.time, v); dx.edgeDistortScale = (float)v;
+        if (bDistortion) dx.edgeDistortEnable = 1.0f;
+
+        // Vortex
+        m_DistVortexEnable->getValue(bDistortion);
+        m_DistVortexCenterX->getValueAtTime(a.time, v); dx.vortexCenterX = (float)v;
+        m_DistVortexCenterY->getValueAtTime(a.time, v); dx.vortexCenterY = (float)v;
+        m_DistVortexStrength->getValueAtTime(a.time, v); dx.vortexStrength = (float)v;
+        m_DistVortexRadius->getValueAtTime(a.time, v); dx.vortexRadius = (float)v;
+        m_DistVortexSpeed->getValueAtTime(a.time, v); dx.vortexSpeed = (float)v;
+        if (bDistortion) dx.vortexEnable = 1.0f;
+
+        // Wave Distort
+        m_DistWaveDistortEnable->getValue(bDistortion);
+        m_DistWaveDistortFreqX->getValueAtTime(a.time, v); dx.waveDistortFreqX = (float)v;
+        m_DistWaveDistortFreqY->getValueAtTime(a.time, v); dx.waveDistortFreqY = (float)v;
+        m_DistWaveDistortAmpX->getValueAtTime(a.time, v); dx.waveDistortAmpX = (float)v;
+        m_DistWaveDistortAmpY->getValueAtTime(a.time, v); dx.waveDistortAmpY = (float)v;
+        m_DistWaveDistortSpeed->getValueAtTime(a.time, v); dx.waveDistortSpeed = (float)v;
+        if (bDistortion) dx.waveDistortEnable = 1.0f;
+
+        // Twist
+        m_DistTwistEnable->getValue(bDistortion);
+        m_DistTwistCenterX->getValueAtTime(a.time, v); dx.twistCenterX = (float)v;
+        m_DistTwistCenterY->getValueAtTime(a.time, v); dx.twistCenterY = (float)v;
+        m_DistTwistAmount->getValueAtTime(a.time, v); dx.twistAmount = (float)v;
+        m_DistTwistRadius->getValueAtTime(a.time, v); dx.twistRadius = (float)v;
+        m_DistTwistSharpness->getValueAtTime(a.time, v); dx.twistSharpness = (float)v;
+        if (bDistortion) dx.twistEnable = 1.0f;
+
         double rsx=a.renderScale.x, rsy=a.renderScale.y;
         int maxD = (std::max)(w, h);
 
@@ -983,6 +1261,46 @@ public:
                     fx.vignette, fx.grain, fx.scanlines, fx.dreamHaze,
                     fx.globalHueShift, fx.pixelate, fx.mirrorGlobal, fx.time);
             }
+            // NEW: Distortion FX pass
+            if (hasAnyDistortion(dx)) {
+                RunCudaDistortionPass(a.pCudaStream, dD, w, h,
+                    dx.fluidEnable, dx.fluidBlobCount, dx.fluidThreshold,
+                    dx.fluidJitter, dx.fluidSpeed,
+                    dx.mirrorFractalEnable, dx.mirrorDepth, dx.mirrorRotateEach,
+                    dx.mirrorScale, dx.mirrorSeed,
+                    dx.glitchSliceEnable, dx.sliceCount, dx.sliceDisplaceAmt,
+                    dx.sliceRandSeed, dx.sliceRGBSplit,
+                    dx.triangulateEnable, dx.triPointCount, dx.triEdgeThickness,
+                    dx.triEdgeColor[0], dx.triEdgeColor[1], dx.triEdgeColor[2],
+                    dx.triFillVariant,
+                    dx.rippleEnable, dx.rippleCenterX, dx.rippleCenterY,
+                    dx.rippleFrequency, dx.rippleAmplitude, dx.rippleDecay,
+                    dx.rippleSpeed, dx.ripplePhase,
+                    dx.displacementEnable, dx.dispStrength, dx.dispScale,
+                    dx.dispChannel, dx.dispDirection,
+                    dx.tileEnable, dx.tileRows, dx.tileCols,
+                    dx.tileOffsetX, dx.tileOffsetY, dx.tileRandomSeed,
+                    dx.timeWaverEnable, dx.waverAmount, dx.waverSpeed, dx.waverBlockSize,
+                    dx.perlinEnable, dx.perlinScale, dx.perlinAmount, dx.perlinOctaves, dx.perlinSpeed, dx.perlinSeed,
+                    dx.polarEnable, dx.polarMode, dx.polarCenterX, dx.polarCenterY, dx.polarRadius, dx.polarAngle,
+                    dx.chromaWaveEnable, dx.chromaWaveFreq, dx.chromaWaveAmp, dx.chromaWaveSpeed, dx.chromaWaveOffset,
+                    dx.rgbShiftEnable, dx.rgbShiftAmount, dx.rgbShiftAngle, dx.rgbShiftSpeed, dx.rgbShiftR, dx.rgbShiftG, dx.rgbShiftB,
+                    dx.lensCurveEnable, dx.lensCurveAmount, dx.lensCurvePower, dx.lensCurveCenterX, dx.lensCurveCenterY,
+                    dx.sineWarpEnable, dx.sineWarpFreqX, dx.sineWarpFreqY, dx.sineWarpAmp, dx.sineWarpOctaves, dx.sineWarpSpeed,
+                    dx.spiralWarpEnable, dx.spiralWarpTwist, dx.spiralWarpZoom, dx.spiralWarpCenterX, dx.spiralWarpCenterY, dx.spiralWarpSpeed,
+                    dx.noiseDispEnable, dx.noiseDispScale, dx.noiseDispAmount, dx.noiseDispSeed, dx.noiseDispChannel, dx.noiseDispTime,
+                    dx.radialBlurEnable, dx.radialBlurAmount, dx.radialBlurCenterX, dx.radialBlurCenterY, dx.radialBlurSamples, dx.radialBlurTime,
+                    dx.circleEnable, dx.circleCenterX, dx.circleCenterY, dx.circleInnerRadius, dx.circleOuterRadius, dx.circleSoftness, dx.circleInvert,
+                    dx.blockShuffleEnable, dx.blockShuffleSize, dx.blockShuffleAmount, dx.blockShuffleSeed,
+                    dx.scanlinesEnable, dx.scanlinesSpacing, dx.scanlinesOffset, dx.scanlinesWarp, dx.scanlinesSpeed,
+                    dx.pixelSortEnable, dx.pixelSortThreshold, dx.pixelSortDirection, dx.pixelSortAmount,
+                    dx.edgeDistortEnable, dx.edgeDistortThreshold, dx.edgeDistortAmount, dx.edgeDistortScale,
+                    dx.vortexEnable, dx.vortexCenterX, dx.vortexCenterY, dx.vortexStrength, dx.vortexRadius, dx.vortexSpeed,
+                    dx.waveDistortEnable, dx.waveDistortFreqX, dx.waveDistortFreqY, dx.waveDistortAmpX, dx.waveDistortAmpY, dx.waveDistortSpeed,
+                    dx.twistEnable, dx.twistCenterX, dx.twistCenterY, dx.twistAmount, dx.twistRadius, dx.twistSharpness,
+                    dx.time,
+                    dx.growProgress, dx.growRadial, dx.growDirection, dx.growSoftness);
+            }
             return;
         }
 #endif
@@ -1011,6 +1329,10 @@ public:
 
         if (bDreamcore)
             cpuGlobalFX(dBase, dB, dRB, w, h, fx);
+
+        // NEW: Distortion FX pass (CPU)
+        if (hasAnyDistortion(dx))
+            cpuDistortionPass(dBase, dB, dRB, w, h, dx);
     }
 
     virtual bool isIdentity(const IsIdentityArguments& a,
@@ -1052,6 +1374,57 @@ private:
     DoubleParam *m_SurrSpatialEvolveSpeed;
     DoubleParam *m_SurrGrowProgress, *m_SurrGrowRadial;
     DoubleParam *m_SurrGrowDirection, *m_SurrGrowSoftness;
+
+    // New Distortion FX parameters
+    // Fluid Morph
+    BooleanParam *m_DistFluidEnable;
+    DoubleParam *m_DistFluidBlobCount, *m_DistFluidThreshold, *m_DistFluidJitter, *m_DistFluidSpeed;
+    // Mirror Fractal
+    BooleanParam *m_DistMirrorFractalEnable;
+    DoubleParam *m_DistMirrorDepth, *m_DistMirrorRotateEach, *m_DistMirrorScale;
+    // Glitch Slice
+    BooleanParam *m_DistGlitchSliceEnable;
+    DoubleParam *m_DistSliceCount, *m_DistSliceDisplaceAmt, *m_DistSliceRandSeed, *m_DistSliceRGBSplit;
+    // Triangulate
+    BooleanParam *m_DistTriangulateEnable;
+    DoubleParam *m_DistTriPointCount, *m_DistTriEdgeThickness, *m_DistTriFillVariant;
+    RGBParam *m_DistTriEdgeColor;
+    // Water Ripple
+    BooleanParam *m_DistRippleEnable;
+    DoubleParam *m_DistRippleCenterX, *m_DistRippleCenterY;
+    DoubleParam *m_DistRippleFrequency, *m_DistRippleAmplitude;
+    DoubleParam *m_DistRippleDecay, *m_DistRippleSpeed, *m_DistRipplePhase;
+    // Displacement Map
+    BooleanParam *m_DistDisplacementEnable;
+    DoubleParam *m_DistDispStrength, *m_DistDispScale, *m_DistDispChannel, *m_DistDispDirection;
+    // Tile/Repeat
+    BooleanParam *m_DistTileEnable;
+    DoubleParam *m_DistTileRows, *m_DistTileCols, *m_DistTileOffsetX, *m_DistTileOffsetY, *m_DistTileRandomSeed;
+    // Time Waver
+    BooleanParam *m_DistTimeWaverEnable;
+    DoubleParam *m_DistWaverAmount, *m_DistWaverSpeed, *m_DistWaverBlockSize;
+    // Block Shuffle
+    BooleanParam *m_DistBlockShuffleEnable;
+    DoubleParam *m_DistBlockShuffleSize, *m_DistBlockShuffleAmount, *m_DistBlockShuffleSeed;
+    // Scanlines
+    BooleanParam *m_DistScanlinesEnable;
+    DoubleParam *m_DistScanlinesSpacing, *m_DistScanlinesOffset, *m_DistScanlinesWarp, *m_DistScanlinesSpeed;
+    // Pixel Sort
+    BooleanParam *m_DistPixelSortEnable;
+    DoubleParam *m_DistPixelSortThreshold, *m_DistPixelSortDirection, *m_DistPixelSortAmount;
+    // Edge Distort
+    BooleanParam *m_DistEdgeDistortEnable;
+    DoubleParam *m_DistEdgeDistortThreshold, *m_DistEdgeDistortAmount, *m_DistEdgeDistortScale;
+    // Vortex
+    BooleanParam *m_DistVortexEnable;
+    DoubleParam *m_DistVortexCenterX, *m_DistVortexCenterY, *m_DistVortexStrength, *m_DistVortexRadius, *m_DistVortexSpeed;
+    // Wave Distort
+    BooleanParam *m_DistWaveDistortEnable;
+    DoubleParam *m_DistWaveDistortFreqX, *m_DistWaveDistortFreqY, *m_DistWaveDistortAmpX, *m_DistWaveDistortAmpY, *m_DistWaveDistortSpeed;
+    // Twist
+    BooleanParam *m_DistTwistEnable;
+    DoubleParam *m_DistTwistCenterX, *m_DistTwistCenterY, *m_DistTwistAmount, *m_DistTwistRadius, *m_DistTwistSharpness;
+    // Distortion Grow Mask (reuses surrealism ones)
 
 };
 
@@ -1781,6 +2154,409 @@ public:
           b->setDefault(false);
           b->setHint("Enable full-frame surrealism distortions & color FX");
           b->setAnimates(false); b->setParent(*gR); pg->addChild(*b); }
+
+        // ╔═══ NEW: DISTORTION MODULE ═══╗
+        GroupParamDescriptor* gDist = d.defineGroupParam("grpDistortion");
+        gDist->setLabels("Distortion FX","Distortion FX","Distortion FX");
+        gDist->setOpen(true); pg->addChild(*gDist);
+
+        // ---- Distortion > Fluid Morph ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistFluid");
+          g->setLabels("Fluid Morph","Fluid Morph","Fluid Morph");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distFluidEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distFluidBlobCount");
+          p->setLabels("Blob Count","Blob Count","Blob Count");
+          p->setDefault(5); p->setRange(3,10); p->setDisplayRange(3,10);
+          p->setHint("Number of organic blobs"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distFluidThreshold");
+          p->setLabels("Threshold","Threshold","Threshold");
+          p->setDefault(0.5); p->setRange(0.1,2.0); p->setDisplayRange(0.1,1.5);
+          p->setHint("Merge threshold for metaballs"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distFluidJitter");
+          p->setLabels("Jitter","Jitter","Jitter");
+          p->setDefault(0.3); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("Organic wobble amount"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distFluidSpeed");
+          p->setLabels("Speed","Speed","Speed");
+          p->setDefault(1); p->setRange(0.1,5); p->setDisplayRange(0.1,3);
+          p->setHint("Animation speed"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Mirror Fractal ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistMirror");
+          g->setLabels("Mirror Fractal","Mirror Fractal","Mirror Fractal");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distMirrorFractalEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distMirrorDepth");
+          p->setLabels("Depth","Depth","Depth");
+          p->setDefault(3); p->setRange(2,8); p->setDisplayRange(2,6);
+          p->setHint("Recursion levels (2-8)"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distMirrorRotateEach");
+          p->setLabels("Rotate Each","Rotate Each","Rotate Each");
+          p->setDefault(0.2); p->setRange(0,1); p->setDisplayRange(0,0.5);
+          p->setHint("Rotation per recursion level"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distMirrorScale");
+          p->setLabels("Scale","Scale","Scale");
+          p->setDefault(0.9); p->setRange(0.5,1.5); p->setDisplayRange(0.7,1.2);
+          p->setHint("Scale per level"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Glitch Slice ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistGlitchSlice");
+          g->setLabels("Glitch Slice","Glitch Slice","Glitch Slice");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distGlitchSliceEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distSliceCount");
+          p->setLabels("Slice Count","Slice Count","Slice Count");
+          p->setDefault(8); p->setRange(4,32); p->setDisplayRange(4,24);
+          p->setHint("Number of horizontal bands"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distSliceDisplaceAmt");
+          p->setLabels("Displace Amount","Displace Amount","Displace Amount");
+          p->setDefault(20); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Horizontal displacement"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distSliceRandSeed");
+          p->setLabels("Random Seed","Random Seed","Random Seed");
+          p->setDefault(42); p->setRange(0,1000); p->setDisplayRange(0,500);
+          p->setHint("Random seed for variation"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distSliceRGBSplit");
+          p->setLabels("RGB Split","RGB Split","RGB Split");
+          p->setDefault(5); p->setRange(0,20); p->setDisplayRange(0,15);
+          p->setHint("Chromatic aberration per slice"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Triangulate ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistTriangulate");
+          g->setLabels("Triangulate","Triangulate","Triangulate");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distTriangulateEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distTriPointCount");
+          p->setLabels("Point Count","Point Count","Point Count");
+          p->setDefault(500); p->setRange(50,2000); p->setDisplayRange(100,1000);
+          p->setHint("Number of triangle points"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distTriEdgeThickness");
+          p->setLabels("Edge Thickness","Edge Thickness","Edge Thickness");
+          p->setDefault(0); p->setRange(0,5); p->setDisplayRange(0,2);
+          p->setHint("Edge line width (0=off)"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distTriFillVariant");
+          p->setLabels("Fill Variant","Fill Variant","Fill Variant");
+          p->setDefault(0.1); p->setRange(0,0.5); p->setDisplayRange(0,0.3);
+          p->setHint("Color variation within triangles"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          RGBParamDescriptor* c = d.defineRGBParam("distTriEdgeColor");
+          c->setLabels("Edge Color","Edge Color","Edge Color");
+          c->setDefault(0, 0, 0);
+          c->setHint("Triangle edge line color"); c->setAnimates(true); c->setParent(*g); pg->addChild(*c);
+        }
+
+        // ---- Distortion > Water Ripple ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistRipple");
+          g->setLabels("Water Ripple","Water Ripple","Water Ripple");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distRippleEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distRippleCenterX");
+          p->setLabels("Center X","Center X","Center X");
+          p->setDefault(0.5); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("Ripple center (0-1 normalized)"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distRippleCenterY");
+          p->setLabels("Center Y","Center Y","Center Y");
+          p->setDefault(0.5); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("Ripple center (0-1 normalized)"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distRippleFrequency");
+          p->setLabels("Frequency","Frequency","Frequency");
+          p->setDefault(10); p->setRange(1,50); p->setDisplayRange(1,30);
+          p->setHint("Wave frequency"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distRippleAmplitude");
+          p->setLabels("Amplitude","Amplitude","Amplitude");
+          p->setDefault(20); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Wave amplitude"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distRippleDecay");
+          p->setLabels("Decay","Decay","Decay");
+          p->setDefault(0.8); p->setRange(0,2); p->setDisplayRange(0.1,1.5);
+          p->setHint("Distance decay rate"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distRippleSpeed");
+          p->setLabels("Speed","Speed","Speed");
+          p->setDefault(1); p->setRange(0,5); p->setDisplayRange(0,3);
+          p->setHint("Animation speed"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distRipplePhase");
+          p->setLabels("Phase","Phase","Phase");
+          p->setDefault(0); p->setRange(0,6.28); p->setDisplayRange(0,6.28);
+          p->setHint("Phase offset"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Displacement Map ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistDisplacement");
+          g->setLabels("Displacement Map","Displacement Map","Displacement Map");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distDisplacementEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distDispStrength");
+          p->setLabels("Strength","Strength","Strength");
+          p->setDefault(20); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Displacement strength"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distDispScale");
+          p->setLabels("Scale","Scale","Scale");
+          p->setDefault(0.02); p->setRange(0.001,0.1); p->setDisplayRange(0.005,0.05);
+          p->setHint("Frequency scale"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distDispChannel");
+          p->setLabels("Channel","Channel","Channel");
+          p->setDefault(3); p->setRange(0,3); p->setDisplayRange(0,3);
+          p->setHint("0=R 1=G 2=B 3=Luma"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distDispDirection");
+          p->setLabels("Direction","Direction","Direction");
+          p->setDefault(0); p->setRange(0,2); p->setDisplayRange(0,2);
+          p->setHint("0=Both 1=Horizontal 2=Vertical"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Tile/Repeat ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistTile");
+          g->setLabels("Tile/Repeat","Tile/Repeat","Tile/Repeat");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distTileEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distTileRows");
+          p->setLabels("Rows","Rows","Rows");
+          p->setDefault(2); p->setRange(1,10); p->setDisplayRange(1,6);
+          p->setHint("Number of tile rows"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distTileCols");
+          p->setLabels("Cols","Cols","Cols");
+          p->setDefault(2); p->setRange(1,10); p->setDisplayRange(1,6);
+          p->setHint("Number of tile columns"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distTileOffsetX");
+          p->setLabels("Offset X","Offset X","Offset X");
+          p->setDefault(0); p->setRange(-1,1); p->setDisplayRange(-0.5,0.5);
+          p->setHint("X offset per cell"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distTileOffsetY");
+          p->setLabels("Offset Y","Offset Y","Offset Y");
+          p->setDefault(0); p->setRange(-1,1); p->setDisplayRange(-0.5,0.5);
+          p->setHint("Y offset per cell"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distTileRandomSeed");
+          p->setLabels("Random Seed","Random Seed","Random Seed");
+          p->setDefault(777); p->setRange(0,10000); p->setDisplayRange(0,5000);
+          p->setHint("Random seed for variation"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Time Waver ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistTimeWaver");
+          g->setLabels("Time Waver","Time Waver","Time Waver");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distTimeWaverEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distWaverAmount");
+          p->setLabels("Amount","Amount","Amount");
+          p->setDefault(1); p->setRange(0,5); p->setDisplayRange(0,3);
+          p->setHint("Frame jitter amount"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distWaverSpeed");
+          p->setLabels("Speed","Speed","Speed");
+          p->setDefault(1); p->setRange(0.1,5); p->setDisplayRange(0.1,3);
+          p->setHint("Jitter frequency"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distWaverBlockSize");
+          p->setLabels("Block Size","Block Size","Block Size");
+          p->setDefault(32); p->setRange(4,128); p->setDisplayRange(8,64);
+          p->setHint("Spatial block size for jitter"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Block Shuffle ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistBlockShuffle");
+          g->setLabels("Block Shuffle","Block Shuffle","Block Shuffle");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distBlockShuffleEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distBlockShuffleSize");
+          p->setLabels("Block Size","Block Size","Block Size");
+          p->setDefault(32); p->setRange(8,128); p->setDisplayRange(16,64);
+          p->setHint("Size of blocks to shuffle"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distBlockShuffleAmount");
+          p->setLabels("Amount","Amount","Amount");
+          p->setDefault(1); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("How many blocks to shuffle"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distBlockShuffleSeed");
+          p->setLabels("Seed","Seed","Seed");
+          p->setDefault(1234); p->setRange(0,10000); p->setDisplayRange(0,5000);
+          p->setHint("Random seed"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Scanlines ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistScanlines");
+          g->setLabels("Scanlines","Scanlines","Scanlines");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distScanlinesEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distScanlinesSpacing");
+          p->setLabels("Spacing","Spacing","Spacing");
+          p->setDefault(4); p->setRange(1,20); p->setDisplayRange(2,10);
+          p->setHint("Line spacing"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distScanlinesOffset");
+          p->setLabels("Offset","Offset","Offset");
+          p->setDefault(0); p->setRange(0,20); p->setDisplayRange(0,10);
+          p->setHint("Phase offset"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distScanlinesWarp");
+          p->setLabels("Warp","Warp","Warp");
+          p->setDefault(0); p->setRange(0,50); p->setDisplayRange(0,25);
+          p->setHint("Line wobble amount"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distScanlinesSpeed");
+          p->setLabels("Speed","Speed","Speed");
+          p->setDefault(0); p->setRange(0,5); p->setDisplayRange(0,2);
+          p->setHint("Animation speed"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Pixel Sort ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistPixelSort");
+          g->setLabels("Pixel Sort","Pixel Sort","Pixel Sort");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distPixelSortEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distPixelSortThreshold");
+          p->setLabels("Threshold","Threshold","Threshold");
+          p->setDefault(0.5); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("Brightness threshold"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distPixelSortDirection");
+          p->setLabels("Direction","Direction","Direction");
+          p->setDefault(0); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("0=horizontal, 1=vertical"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distPixelSortAmount");
+          p->setLabels("Amount","Amount","Amount");
+          p->setDefault(0.5); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("How much to sort"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Edge Distort ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistEdgeDistort");
+          g->setLabels("Edge Distort","Edge Distort","Edge Distort");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distEdgeDistortEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distEdgeDistortThreshold");
+          p->setLabels("Threshold","Threshold","Threshold");
+          p->setDefault(0.1); p->setRange(0.01,1); p->setDisplayRange(0.01,0.3);
+          p->setHint("Edge detection threshold"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distEdgeDistortAmount");
+          p->setLabels("Amount","Amount","Amount");
+          p->setDefault(50); p->setRange(0,100); p->setDisplayRange(10,100);
+          p->setHint("Displacement amount"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distEdgeDistortScale");
+          p->setLabels("Scale","Scale","Scale");
+          p->setDefault(0.05); p->setRange(0.01,0.5); p->setDisplayRange(0.02,0.2);
+          p->setHint("Noise scale"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Vortex ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistVortex");
+          g->setLabels("Vortex","Vortex","Vortex");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distVortexEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distVortexCenterX");
+          p->setLabels("Center X","Center X","Center X");
+          p->setDefault(0.5); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("Center X position"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distVortexCenterY");
+          p->setLabels("Center Y","Center Y","Center Y");
+          p->setDefault(0.5); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("Center Y position"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distVortexStrength");
+          p->setLabels("Strength","Strength","Strength");
+          p->setDefault(1); p->setRange(-5,5); p->setDisplayRange(-2,2);
+          p->setHint("Rotation strength"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distVortexRadius");
+          p->setLabels("Radius","Radius","Radius");
+          p->setDefault(0.5); p->setRange(0,1); p->setDisplayRange(0.2,1);
+          p->setHint("Effect radius"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distVortexSpeed");
+          p->setLabels("Speed","Speed","Speed");
+          p->setDefault(0); p->setRange(0,5); p->setDisplayRange(0,2);
+          p->setHint("Animation speed"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Wave Distort ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistWaveDistort");
+          g->setLabels("Wave Distort","Wave Distort","Wave Distort");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distWaveDistortEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distWaveDistortFreqX");
+          p->setLabels("Freq X","Freq X","Freq X");
+          p->setDefault(5); p->setRange(1,50); p->setDisplayRange(2,20);
+          p->setHint("Horizontal frequency"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distWaveDistortFreqY");
+          p->setLabels("Freq Y","Freq Y","Freq Y");
+          p->setDefault(5); p->setRange(1,50); p->setDisplayRange(2,20);
+          p->setHint("Vertical frequency"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distWaveDistortAmpX");
+          p->setLabels("Amp X","Amp X","Amp X");
+          p->setDefault(10); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Horizontal amplitude"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distWaveDistortAmpY");
+          p->setLabels("Amp Y","Amp Y","Amp Y");
+          p->setDefault(10); p->setRange(0,100); p->setDisplayRange(0,50);
+          p->setHint("Vertical amplitude"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distWaveDistortSpeed");
+          p->setLabels("Speed","Speed","Speed");
+          p->setDefault(0); p->setRange(0,5); p->setDisplayRange(0,2);
+          p->setHint("Animation speed"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
+
+        // ---- Distortion > Twist ----
+        { GroupParamDescriptor* g = d.defineGroupParam("grpDistTwist");
+          g->setLabels("Twist","Twist","Twist");
+          g->setOpen(true); g->setParent(*gDist); pg->addChild(*g);
+          BooleanParamDescriptor* b = d.defineBooleanParam("distTwistEnable");
+          b->setLabels("Enable","Enable","Enable");
+          b->setDefault(false); b->setAnimates(false); b->setParent(*g); pg->addChild(*b);
+          DoubleParamDescriptor* p;
+          p = d.defineDoubleParam("distTwistCenterX");
+          p->setLabels("Center X","Center X","Center X");
+          p->setDefault(0.5); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("Center X position"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distTwistCenterY");
+          p->setLabels("Center Y","Center Y","Center Y");
+          p->setDefault(0.5); p->setRange(0,1); p->setDisplayRange(0,1);
+          p->setHint("Center Y position"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distTwistAmount");
+          p->setLabels("Amount","Amount","Amount");
+          p->setDefault(0); p->setRange(-10,10); p->setDisplayRange(-3,3);
+          p->setHint("Twist amount"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distTwistRadius");
+          p->setLabels("Radius","Radius","Radius");
+          p->setDefault(0.5); p->setRange(0,1); p->setDisplayRange(0.2,1);
+          p->setHint("Effect radius"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+          p = d.defineDoubleParam("distTwistSharpness");
+          p->setLabels("Sharpness","Sharpness","Sharpness");
+          p->setDefault(1); p->setRange(0.1,5); p->setDisplayRange(0.5,3);
+          p->setHint("Edge falloff"); p->setAnimates(true); p->setParent(*g); pg->addChild(*p);
+        }
 
         // ---- Dreamcore > Atmosphere ----
         { GroupParamDescriptor* g = d.defineGroupParam("grpDcAtmos");
