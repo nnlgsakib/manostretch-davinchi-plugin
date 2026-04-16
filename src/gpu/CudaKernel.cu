@@ -464,7 +464,8 @@ __global__ void surrealismKernel(const float* srcCopy, float* dst, int w, int h,
     float waveFreq, float waveAmp, float chromaAb, float posterize,
     float hueShift, float solarize, float colorInvert, float time,
     float spatialSpinSpeed, float spatialKaleidoRotate,
-    float spatialMeltPulse, float spatialMeltPulseFreq, float spatialEvolveSpeed)
+    float spatialMeltPulse, float spatialMeltPulseFreq, float spatialEvolveSpeed,
+    float growProgress, float growRadial, float growDirection, float growSoftness)
 {
     int px = blockIdx.x * blockDim.x + threadIdx.x;
     int py = blockIdx.y * blockDim.y + threadIdx.y;
@@ -547,6 +548,32 @@ __global__ void surrealismKernel(const float* srcCopy, float* dst, int w, int h,
         srcY += cosf(nx * waveFreq * 6.2832f + time*0.7f) * waveAmp;
     }
 
+    // Distortion Grow mask
+    if (growProgress < 0.999f || growRadial > 0.01f) {
+        float gm = growProgress;
+        if (growRadial > 0.01f) {
+            float rdx = (lx - cx) / (cx + 0.001f);
+            float rdy = (ly - cy) / (cy + 0.001f);
+            float rDist = sqrtf(rdx*rdx + rdy*rdy);
+            float soft = fmaxf(growSoftness, 0.01f);
+            float radMask = 1.f - rDist * growRadial;
+            radMask = radMask / soft;
+            radMask = fminf(1.f, fmaxf(0.f, radMask));
+            gm *= radMask;
+        }
+        if (fabsf(growDirection) > 0.001f) {
+            float nx = (lx / (float)w) - 0.5f;
+            float ny = (ly / (float)h) - 0.5f;
+            float proj = nx * cosf(growDirection) + ny * sinf(growDirection);
+            float soft = fmaxf(growSoftness, 0.01f);
+            float dirMask = (proj + 0.5f) / soft;
+            dirMask = fminf(1.f, fmaxf(0.f, dirMask));
+            gm *= dirMask;
+        }
+        srcX = lx + (srcX - lx) * gm;
+        srcY = ly + (srcY - ly) * gm;
+    }
+
     // Sample from source copy
     float rgba[4];
     for (int c = 0; c < 4; c++)
@@ -602,7 +629,8 @@ extern "C" void RunCudaSurrealismPass(
     float waveFreq, float waveAmp, float chromaAb, float posterize,
     float hueShift, float solarize, float colorInvert, float time,
     float spatialSpinSpeed, float spatialKaleidoRotate,
-    float spatialMeltPulse, float spatialMeltPulseFreq, float spatialEvolveSpeed)
+    float spatialMeltPulse, float spatialMeltPulseFreq, float spatialEvolveSpeed,
+    float growProgress, float growRadial, float growDirection, float growSoftness)
 {
     bool hasDist = fractalAmt > 0.01f || kaleidoSegs > 1.5f
                 || vortexAmt > 0.01f || fabsf(meltAmt) > 0.01f
@@ -630,7 +658,8 @@ extern "C" void RunCudaSurrealismPass(
         waveFreq, waveAmp, chromaAb, posterize,
         hueShift, solarize, colorInvert, time,
         spatialSpinSpeed, spatialKaleidoRotate,
-        spatialMeltPulse, spatialMeltPulseFreq, spatialEvolveSpeed);
+        spatialMeltPulse, spatialMeltPulseFreq, spatialEvolveSpeed,
+        growProgress, growRadial, growDirection, growSoftness);
 
     cudaFree(tmp);
 }

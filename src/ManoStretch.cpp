@@ -72,7 +72,8 @@ extern "C" void RunCudaSurrealismPass(void* stream, float* dst,
     float chromaAb, float posterize, float hueShift,
     float solarize, float colorInvert, float time,
     float spatialSpinSpeed, float spatialKaleidoRotate,
-    float spatialMeltPulse, float spatialMeltPulseFreq, float spatialEvolveSpeed);
+    float spatialMeltPulse, float spatialMeltPulseFreq, float spatialEvolveSpeed,
+    float growProgress, float growRadial, float growDirection, float growSoftness);
 #endif
 
 enum StretchMode { eLinear=0, eSpiral=1, eWave=2, eTaper=3, eSmear=4, eShatter=5,
@@ -597,6 +598,10 @@ struct SurrealismFX {
     float spatialKaleidoRotate;
     float spatialMeltPulse, spatialMeltPulseFreq;
     float spatialEvolveSpeed;
+    float growProgress;
+    float growRadial;
+    float growDirection;
+    float growSoftness;
     float time;
 };
 
@@ -702,6 +707,34 @@ static void cpuSurrealismPass(void* dstBase, const OfxRectI& dB, int dRB,
             float nx = lx / (float)w, ny = ly / (float)h;
             srcX += std::sin(ny * sfx.waveFreq * (float)(2.0*M_PI) + sfx.time) * sfx.waveAmp;
             srcY += std::cos(nx * sfx.waveFreq * (float)(2.0*M_PI) + sfx.time*0.7f) * sfx.waveAmp;
+        }
+
+        // Distortion Grow mask — scale displacement toward original position
+        if (sfx.growProgress < 0.999f || sfx.growRadial > 0.01f) {
+            float gm = sfx.growProgress;
+            // Radial: fade from center outward
+            if (sfx.growRadial > 0.01f) {
+                float rdx = (lx - cx) / (cx + 0.001f);
+                float rdy = (ly - cy) / (cy + 0.001f);
+                float rDist = std::sqrt(rdx*rdx + rdy*rdy);
+                float soft = (std::max)(sfx.growSoftness, 0.01f);
+                float radMask = 1.f - rDist * sfx.growRadial;
+                radMask = radMask / soft;
+                radMask = (std::min)(1.f, (std::max)(0.f, radMask));
+                gm *= radMask;
+            }
+            // Directional wipe
+            if (std::abs(sfx.growDirection) > 0.001f) {
+                float nx = (lx / (float)w) - 0.5f;
+                float ny = (ly / (float)h) - 0.5f;
+                float proj = nx * std::cos(sfx.growDirection) + ny * std::sin(sfx.growDirection);
+                float soft = (std::max)(sfx.growSoftness, 0.01f);
+                float dirMask = (proj + 0.5f) / soft;
+                dirMask = (std::min)(1.f, (std::max)(0.f, dirMask));
+                gm *= dirMask;
+            }
+            srcX = lx + (srcX - lx) * gm;
+            srcY = ly + (srcY - ly) * gm;
         }
 
         // Sample from temp copy
@@ -816,6 +849,10 @@ public:
         m_SurrSpatialMeltPulse     = fetchDoubleParam("surrSpatialMeltPulse");
         m_SurrSpatialMeltPulseFreq = fetchDoubleParam("surrSpatialMeltPulseFreq");
         m_SurrSpatialEvolveSpeed   = fetchDoubleParam("surrSpatialEvolveSpeed");
+        m_SurrGrowProgress   = fetchDoubleParam("surrGrowProgress");
+        m_SurrGrowRadial     = fetchDoubleParam("surrGrowRadial");
+        m_SurrGrowDirection  = fetchDoubleParam("surrGrowDirection");
+        m_SurrGrowSoftness   = fetchDoubleParam("surrGrowSoftness");
     }
 
     virtual void render(const RenderArguments& a) {
@@ -899,6 +936,10 @@ public:
             m_SurrSpatialMeltPulse->getValueAtTime(a.time, v);     sfx.spatialMeltPulse     = (float)v;
             m_SurrSpatialMeltPulseFreq->getValueAtTime(a.time, v); sfx.spatialMeltPulseFreq = (float)v;
             m_SurrSpatialEvolveSpeed->getValueAtTime(a.time, v);   sfx.spatialEvolveSpeed   = (float)v;
+            m_SurrGrowProgress->getValueAtTime(a.time, v);   sfx.growProgress  = (float)(v / 100.0);
+            m_SurrGrowRadial->getValueAtTime(a.time, v);     sfx.growRadial    = (float)(v / 100.0);
+            m_SurrGrowDirection->getValueAtTime(a.time, v);  sfx.growDirection = (float)(v * M_PI / 180.0);
+            m_SurrGrowSoftness->getValueAtTime(a.time, v);   sfx.growSoftness  = (float)(v / 100.0);
         }
 
         double rsx=a.renderScale.x, rsy=a.renderScale.y;
@@ -934,7 +975,8 @@ public:
                     sfx.waveFreq, sfx.waveAmp, sfx.chromaAb, sfx.posterize,
                     sfx.hueShift, sfx.solarize, sfx.colorInvert, sfx.time,
                     sfx.spatialSpinSpeed, sfx.spatialKaleidoRotate,
-                    sfx.spatialMeltPulse, sfx.spatialMeltPulseFreq, sfx.spatialEvolveSpeed);
+                    sfx.spatialMeltPulse, sfx.spatialMeltPulseFreq, sfx.spatialEvolveSpeed,
+                    sfx.growProgress, sfx.growRadial, sfx.growDirection, sfx.growSoftness);
             }
             if (bDreamcore) {
                 RunCudaGlobalFX(a.pCudaStream, dD, w, h,
@@ -1008,6 +1050,8 @@ private:
     DoubleParam *m_SurrSpatialSpinSpeed, *m_SurrSpatialKaleidoRotate;
     DoubleParam *m_SurrSpatialMeltPulse, *m_SurrSpatialMeltPulseFreq;
     DoubleParam *m_SurrSpatialEvolveSpeed;
+    DoubleParam *m_SurrGrowProgress, *m_SurrGrowRadial;
+    DoubleParam *m_SurrGrowDirection, *m_SurrGrowSoftness;
 
 };
 
@@ -1631,6 +1675,34 @@ public:
             a->setDefault(0); a->setRange(0,10); a->setDisplayRange(0,5);
             a->setHint("Time-evolving noise offset for all spatial distortions");
             a->setAnimates(true); a->setParent(*ga); pg->addChild(*a);
+
+            // ---- Animation > Distortion Grow ----
+            { GroupParamDescriptor* gg = d.defineGroupParam("grpSurrGrow");
+              gg->setLabels("Distortion Grow","Distortion Grow","Distortion Grow");
+              gg->setOpen(false); gg->setParent(*ga); pg->addChild(*gg);
+
+              DoubleParamDescriptor* g2;
+              g2 = d.defineDoubleParam("surrGrowProgress");
+              g2->setLabels("Grow Progress","Grow Progress","Grow Progress");
+              g2->setDefault(100); g2->setRange(0,100); g2->setDisplayRange(0,100);
+              g2->setHint("Master reveal of spatial distortions (0=none, 100=full). Keyframe to animate growth.");
+              g2->setAnimates(true); g2->setParent(*gg); pg->addChild(*g2);
+              g2 = d.defineDoubleParam("surrGrowRadial");
+              g2->setLabels("Grow Radial","Grow Radial","Grow Radial");
+              g2->setDefault(0); g2->setRange(0,100); g2->setDisplayRange(0,100);
+              g2->setHint("Distortions grow outward from center. 0=uniform, 100=center-only.");
+              g2->setAnimates(true); g2->setParent(*gg); pg->addChild(*g2);
+              g2 = d.defineDoubleParam("surrGrowDirection");
+              g2->setLabels("Grow Direction","Grow Direction","Grow Direction");
+              g2->setDefault(0); g2->setRange(-180,180); g2->setDisplayRange(-180,180);
+              g2->setHint("Directional wipe angle for distortion reveal (0=right, 90=up, -90=down)");
+              g2->setAnimates(true); g2->setParent(*gg); pg->addChild(*g2);
+              g2 = d.defineDoubleParam("surrGrowSoftness");
+              g2->setLabels("Grow Softness","Grow Softness","Grow Softness");
+              g2->setDefault(25); g2->setRange(1,100); g2->setDisplayRange(1,100);
+              g2->setHint("Edge softness of the grow mask transition");
+              g2->setAnimates(true); g2->setParent(*gg); pg->addChild(*g2);
+            }
           }
         }
 
