@@ -1017,15 +1017,15 @@ public:
         PostFX fx;
         double v;
         m_StartBlend->getValue(v);  fx.startBlend  = (float)v;
-        m_PostOpacity->getValue(v); fx.postOpacity  = (float)(v / 100.0);
-        m_PostBright->getValue(v);  fx.postBright   = (float)v;
-        m_PostSat->getValue(v);     fx.postSat      = (float)v;
+        m_PostOpacity->getValueAtTime(a.time, v); fx.postOpacity  = (float)(v / 100.0);
+        m_PostBright->getValueAtTime(a.time, v);  fx.postBright   = (float)v;
+        m_PostSat->getValueAtTime(a.time, v);     fx.postSat      = (float)v;
         { double cr,cg,cb;
           m_PostColor->getValueAtTime(a.time, cr, cg, cb);
           fx.postColorR=(float)cr; fx.postColorG=(float)cg; fx.postColorB=(float)cb; }
         m_PostColorAmt->getValueAtTime(a.time, v); fx.postColorAmt = (float)(v / 100.0);
-        m_LiqAmount->getValue(v);   fx.liqAmount    = (float)v;
-        m_LiqScale->getValue(v);    fx.liqScale     = (float)v;
+        m_LiqAmount->getValueAtTime(a.time, v);   fx.liqAmount    = (float)v;
+        m_LiqScale->getValueAtTime(a.time, v);    fx.liqScale     = (float)v;
         fx.time = (float)a.time;
         m_AnimProgress->getValueAtTime(a.time, v);    fx.animProgress    = (float)(v / 100.0);
         m_AnimGrow->getValueAtTime(a.time, v);         fx.animGrow        = (float)(v / 100.0);
